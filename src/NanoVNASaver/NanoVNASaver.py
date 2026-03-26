@@ -76,6 +76,10 @@ from .Windows import (
     TDRWindow,
 )
 from .Windows.ui import get_window_icon
+####20260302 add
+import os
+from dataclasses import dataclass
+####
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +89,66 @@ WORKING_KILL_TIME_MS = 10 * 1000
 class Communicate(QObject):
     data_available = QtCore.Signal()
 
+@dataclass
+class BatchSweepConfig:
+    out_dir: str
+    base_name: str
+    rest_s: float
+    count: int
+
+class BatchSweepDialog(QtWidgets.QDialog):
+    def __init__(self, parent=None, default_dir: str = "", default_base: str = "sweep"):
+        super().__init__(parent)
+        self.setWindowTitle("Batch sweep setup")
+
+        layout = QtWidgets.QFormLayout(self)
+
+        # Directory
+        dir_row = QtWidgets.QHBoxLayout()
+        self.dir_edit = QtWidgets.QLineEdit(default_dir)
+        btn_browse = QtWidgets.QPushButton("Browse...")
+        btn_browse.clicked.connect(self._browse_dir)
+        dir_row.addWidget(self.dir_edit, 1)
+        dir_row.addWidget(btn_browse)
+        layout.addRow("Save directory:", dir_row)
+
+        # Base name
+        self.base_edit = QtWidgets.QLineEdit(default_base)
+        layout.addRow("Base filename:", self.base_edit)
+
+        # Rest time
+        self.rest_spin = QtWidgets.QDoubleSpinBox()
+        self.rest_spin.setRange(0.0, 3600.0 * 24)
+        self.rest_spin.setDecimals(3)
+        self.rest_spin.setValue(1.0)
+        self.rest_spin.setSuffix(" s")
+        layout.addRow("Rest time:", self.rest_spin)
+
+        # Count
+        self.count_spin = QtWidgets.QSpinBox()
+        self.count_spin.setRange(1, 10_000_000)
+        self.count_spin.setValue(30)
+        layout.addRow("Number of sweeps:", self.count_spin)
+
+        # Buttons
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addRow(buttons)
+
+    def _browse_dir(self):
+        d = QtWidgets.QFileDialog.getExistingDirectory(self, "Select directory", self.dir_edit.text() or os.path.expanduser("~"))
+        if d:
+            self.dir_edit.setText(d)
+
+    def get_config(self) -> "BatchSweepConfig":
+        out_dir = self.dir_edit.text().strip()
+        base = self.base_edit.text().strip() or "sweep"
+        rest_s = float(self.rest_spin.value())
+        count = int(self.count_spin.value())
+        return BatchSweepConfig(out_dir=out_dir, base_name=base, rest_s=rest_s, count=count)
 
 class NanoVNASaver(QWidget):
     version = VERSION
@@ -104,6 +168,9 @@ class NanoVNASaver(QWidget):
 
         self.worker.signals.updated.connect(self.dataUpdated)
         self.worker.signals.finished.connect(self.sweepFinished)
+
+        self.worker.signals.finished.connect(self._on_sweep_finished_for_batch)  
+
         self.worker.signals.sweep_error.connect(self.showSweepError)
 
         self.markers: list[Marker] = []
@@ -121,6 +188,25 @@ class NanoVNASaver(QWidget):
         self.sweep_control = SweepControl(self)
         self.marker_control = MarkerControl(self)
         self.serial_control = SerialControl(self)
+
+        # ---- Sweep snapshot 初期化 ----
+        self._sweep_snapshot = self.sweep.copy()
+
+        # ---- connect_device をラップ（接続直前に保存）----
+        _orig_connect_device = self.serial_control.connect_device
+
+        def _connect_device_wrapped(*args, **kwargs):
+            self._sweep_snapshot = self.sweep.copy()
+            return _orig_connect_device(*args, **kwargs)
+
+        self.serial_control.connect_device = _connect_device_wrapped
+
+        # ---- 接続後に sweep を復元 ----
+        self.serial_control.connected.connect(
+            self._restore_all_sweep_after_connect
+        )
+
+        # 既存のボタン更新も残す
         self.serial_control.connected.connect(
             self.sweep_control.update_sweep_btn
         )
@@ -130,6 +216,11 @@ class NanoVNASaver(QWidget):
         self.dataLock = threading.Lock()
         self.data: Touchstone = Touchstone()
         self.ref_data: Touchstone = Touchstone()
+
+        # Batch sweep state
+        self._batch_active = False
+        self._batch_cfg: BatchSweepConfig | None = None
+        self._batch_index = 0
 
         self.sweepSource = ""
         self.referenceSource = ""
@@ -276,6 +367,24 @@ class NanoVNASaver(QWidget):
         ###############################################################
 
         left_column.addWidget(self.sweep_control)
+
+        # Batch sweep buttons
+        batch_box = QtWidgets.QGroupBox()
+        batch_box.setTitle("Batch sweep")
+        batch_layout = QtWidgets.QVBoxLayout(batch_box)
+
+        self.btn_batch_start = QtWidgets.QPushButton("Batch save ...")
+        self.btn_batch_start.setMinimumHeight(20)
+        self.btn_batch_start.clicked.connect(self.batch_setup_and_start)
+
+        self.btn_batch_stop = QtWidgets.QPushButton("Stop batch")
+        self.btn_batch_stop.setMinimumHeight(20)
+        self.btn_batch_stop.setDisabled(True)
+        self.btn_batch_stop.clicked.connect(self.batch_stop)
+
+        batch_layout.addWidget(self.btn_batch_start)
+        batch_layout.addWidget(self.btn_batch_stop)
+        left_column.addWidget(batch_box)
 
         # ###############################################################
         #  Marker control
@@ -455,6 +564,29 @@ class NanoVNASaver(QWidget):
         left_column.addLayout(button_grid)
 
         logger.debug("Finished building interface")
+
+
+    def _restore_all_sweep_after_connect(self):
+        try:
+            if not self.vna or not hasattr(self.vna, "serial") or not self.vna.serial or not self.vna.serial.is_open:
+                logger.warning("Skip restoring sweep: serial not open yet")
+                return
+            # 1) アプリ側 sweep を丸ごと復元（segments / averaging / log sweep など含む）
+            self.sweep = self._sweep_snapshot.copy()
+
+            # 2) デバイス側に周波数レンジだけは必ず再適用（points設定APIは無いので不要）
+            self.vna.resetSweep(int(self.sweep.start), int(self.sweep.end))
+            # IF bandwidth を強制設定
+            self.vna.bandwidth = 100
+
+            # 3) UI側も復元した sweep に揃える（存在する関数だけ呼ぶ）
+            for name in ("updateInputs", "sync_from_sweep", "set_sweep", "update_from_sweep"):
+                if hasattr(self.sweep_control, name):
+                    getattr(self.sweep_control, name)()
+                    break
+
+        except Exception as e:
+            logger.warning("Failed to restore sweep after connect: %s", e)
 
     def auto_connect(
         self,
@@ -718,3 +850,98 @@ class NanoVNASaver(QWidget):
     def update_sweep_title(self):
         for c in self.subscribing_charts:
             c.setSweepTitle(self.sweep.properties.name)
+
+    def batch_setup_and_start(self):
+        default_dir = os.path.expanduser("~")
+        default_base = self.sweep.properties.name or "sweep"
+        dlg = BatchSweepDialog(self, default_dir=default_dir, default_base=default_base)
+        if dlg.exec() != QtWidgets.QDialog.Accepted:
+            return
+
+        cfg = dlg.get_config()
+        if not cfg.out_dir:
+            self.showError("Please select a save directory.")
+            return
+        os.makedirs(cfg.out_dir, exist_ok=True)
+
+        self._batch_cfg = cfg
+        self._batch_index = 0
+        self._batch_active = True
+
+        self.btn_batch_start.setDisabled(True)
+        self.btn_batch_stop.setDisabled(False)
+
+        # start first sweep
+        self._batch_start_next()
+
+    def batch_stop(self):
+        self._batch_active = False
+        self.btn_batch_stop.setDisabled(True)
+        self.btn_batch_start.setDisabled(False)
+        # stop current sweep if running
+        with contextlib.suppress(Exception):
+            self.worker.quit()
+
+    def _batch_start_next(self):
+        if not self._batch_active or not self._batch_cfg:
+            return
+        if self._batch_index >= self._batch_cfg.count:
+            # done
+            self._batch_active = False
+            self.btn_batch_stop.setDisabled(True)
+            self.btn_batch_start.setDisabled(False)
+            return
+
+        self._batch_index += 1
+        self.sweep_start()
+
+    def _on_sweep_finished_for_batch(self):
+        # called on every sweep finish; only act if batch is active
+        if not self._batch_active or not self._batch_cfg:
+            return
+
+        try:
+            self._batch_save_current_touchstone()
+        except Exception as exc:  # noqa: BLE001
+            self.showError(f"Failed saving sweep {self._batch_index}: {exc}")
+            self._batch_active = False
+            self.btn_batch_stop.setDisabled(True)
+            self.btn_batch_start.setDisabled(False)
+            return
+
+        # schedule next sweep after rest time
+        rest_ms = int(self._batch_cfg.rest_s * 1000)
+        QtCore.QTimer.singleShot(rest_ms, self._batch_start_next)
+
+    def _batch_save_current_touchstone(self):
+        assert self._batch_cfg is not None
+        cfg = self._batch_cfg
+        idx = self._batch_index
+
+        # copy data safely
+        with self.dataLock:
+            s11 = self.data.s11[:]
+            s21 = self.data.s21[:]
+
+        if not s11:
+            raise ValueError("No S11 data to save.")
+        if not s21:
+            # allow saving even if S21 is empty: fill zeros
+            s21 = [Datapoint(dp.freq, 0.0, 0.0) for dp in s11]
+
+        # filename with serial number
+        fname = f"{cfg.base_name}_{idx:08d}.s2p"
+        path = os.path.join(cfg.out_dir, fname)
+
+        # Write S2P (S11 S21 S12 S22), fill S12/S22 with zeros
+        # Field order is consistent with Touchstone.FIELD_ORDER ("11","21","12","22") :contentReference[oaicite:5]{index=5}
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("# HZ S RI R 50\n")
+            for i, dp11 in enumerate(s11):
+                dp21 = s21[i] if i < len(s21) else Datapoint(dp11.freq, 0.0, 0.0)
+                # S12, S22 = 0
+                f.write(
+                    f"{dp11.freq} {dp11.re} {dp11.im} "
+                    f"{dp21.re} {dp21.im} "
+                    f"0 0 0 0\n"
+                )

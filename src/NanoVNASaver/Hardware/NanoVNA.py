@@ -60,7 +60,7 @@ class NanoVNA(VNA):
             drain_serial(self.serial)
             self.serial.write("capture\r".encode("ascii"))
             self.serial.readline()
-            self.serial.timeout = 4
+            self.serial.timeout = 10
             image_data = self.serial.read(
                 self.screenwidth * self.screenheight * 2
             )

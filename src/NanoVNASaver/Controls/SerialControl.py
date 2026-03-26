@@ -144,14 +144,15 @@ class SerialControl(Control):
                 * self.app.sweep_control.get_segments()
             )
 
-        self.app.sweep_control.set_segments(1)  # speed up things
+        # self.app.sweep_control.set_segments(1)  # speed up things
+        self.app.sweep_control.set_segments(6)  # speed up things
         self.app.sweep_control.update_center_span()
         self.app.sweep_control.update_step_size()
 
         self.app.windows["sweep_settings"].vna_connected()
 
-        logger.debug("Starting initial sweep")
-        self.app.sweep_start()
+        # logger.debug("Starting initial sweep")
+        # self.app.sweep_start()
 
     def disconnect_device(self):
         with self.interface.lock:

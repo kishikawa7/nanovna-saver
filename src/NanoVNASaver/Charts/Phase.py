@@ -51,6 +51,16 @@ class PhaseChart(FrequencyChart):
             lambda: self.setUnwrap(self.action_unwrap.isChecked())
         )
         self.y_menu.addAction(self.action_unwrap)
+                # Default to logarithmic X-axis for LogMag charts
+        try:
+            self.setLogarithmicX(True)
+            # update menu checked state if actions exist
+            if hasattr(self, "action_set_logarithmic_x"):
+                self.action_set_logarithmic_x.setChecked(True)
+            if hasattr(self, "action_set_linear_x"):
+                self.action_set_linear_x.setChecked(False)
+        except Exception:
+            pass
 
     def copy(self):
         new_chart = super().copy()

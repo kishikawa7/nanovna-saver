@@ -66,7 +66,17 @@ class RealImaginaryZChart(RealImaginaryChart):
         self.y_menu.addSeparator()
         self.y_menu.addAction(self.action_set_fixed_maximum_imag)
         self.y_menu.addAction(self.action_set_fixed_minimum_imag)
-
+        # Default to logarithmic X-axis for LogMag charts
+        try:
+            self.setLogarithmicX(True)
+            # update menu checked state if actions exist
+            if hasattr(self, "action_set_logarithmic_x"):
+                self.action_set_logarithmic_x.setChecked(True)
+            if hasattr(self, "action_set_linear_x"):
+                self.action_set_linear_x.setChecked(False)
+        except Exception:
+            pass
+        
     def drawChart(self, qp: QtGui.QPainter):
         qp.setPen(QtGui.QPen(Chart.color.text))
         qp.drawText(self.leftMargin + 5, 15, f"{self.name} (\N{OHM SIGN})")

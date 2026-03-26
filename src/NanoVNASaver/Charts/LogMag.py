@@ -61,6 +61,17 @@ class LogMagChart(FrequencyChart):
         self.span: float = 1.0
 
         self.isInverted: bool = False
+                # Default to logarithmic X-axis for LogMag charts
+        try:
+            self.setLogarithmicX(True)
+            # update menu checked state if actions exist
+            if hasattr(self, "action_set_logarithmic_x"):
+                self.action_set_logarithmic_x.setChecked(True)
+            if hasattr(self, "action_set_linear_x"):
+                self.action_set_linear_x.setChecked(False)
+        except Exception:
+            pass
+        
 
     def drawValues(self, qp: QtGui.QPainter) -> None:
         if len(self.data) == 0 and len(self.reference) == 0:

@@ -33,9 +33,11 @@ class SweepMode(Enum):
 
 class Properties(NamedTuple):
     name: str = ""
-    mode: "SweepMode" = SweepMode.SINGLE
-    averages: tuple[int, int] = (3, 0)
-    logarithmic: bool = False
+    # mode: "SweepMode" = SweepMode.SINGLE
+    mode: "SweepMode" = SweepMode.AVERAGE
+    averages: tuple[int, int] = (1, 0)
+    # logarithmic: bool = False
+    logarithmic: bool = True
 
 
 class Sweep:
@@ -43,8 +45,8 @@ class Sweep:
         self,
         start: int = 3600000,
         end: int = 30000000,
-        points: int = 101,
-        segments: int = 1,
+        points: int = 51,
+        segments: int = 6,
         properties: Optional["Properties"] = None,
     ):
         self._start = start

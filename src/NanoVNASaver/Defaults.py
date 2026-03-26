@@ -42,12 +42,12 @@ class GuiConfig:
 
 @dataclass
 class ChartsSelectedConfig:
-    chart_00: str = "S11 Smith Chart"
-    chart_01: str = "S11 Return Loss"
-    chart_02: str = "None"
-    chart_10: str = "S21 Polar Plot"
+    chart_00: str = "S21 |Z| shunt"
+    chart_01: str = "S21 R+jX shunt"
+    chart_02: str = "S11 & S21 LogMag"
+    chart_10: str = "S11 Return Loss"
     chart_11: str = "S21 Gain"
-    chart_12: str = "None"
+    chart_12: str = "S21 Phase"
 
 
 @dataclass

@@ -68,8 +68,9 @@ class VNA:
         self.version = Version.parse("0.0.0")
         self.features: set[str] = set()
         self.validateInput = False
-        self.datapoints = self.valid_datapoints[0]
-        self.bandwidth = 1000
+        # self.datapoints = self.valid_datapoints[0]
+        self.datapoints = 51
+        self.bandwidth = 10
         self.bw_method = "ttrftech"
         # [((min_freq, max_freq), [description])]. Order by increasing
         # frequency. Put default output power first.
@@ -81,7 +82,8 @@ class VNA:
             #  cannot read current bandwidth, so set to highest
             #  to get initial sweep fast
             if "Bandwidth" in self.features:
-                self.set_bandwidth(self.get_bandwidths()[-1])
+                # self.set_bandwidth(self.get_bandwidths()[-1])
+                self.set_bandwidth(10)
 
     def connect(self):
         logger.info("connect %s", self.serial)

@@ -155,6 +155,23 @@ class Chart(QtWidgets.QWidget):
 
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.ActionsContextMenu)
 
+    def _x_transform(self, f_hz: float) -> float:
+        """周波数(Hz)→描画用のx値"""
+        # app_config にフラグを作るならここで参照
+        # いまは常にログにしたいなら True 固定でもOK
+        use_log = True
+        if not use_log:
+            return f_hz
+        # logは0以下不可なのでガード
+        return math.log10(max(f_hz, 1.0))
+
+    def _x_inv_transform(self, x_val: float) -> float:
+        """描画用のx値→周波数(Hz)"""
+        use_log = True
+        if not use_log:
+            return x_val
+        return 10 ** x_val
+
     def setReference(self, data) -> None:
         self.reference = data
         self.update()

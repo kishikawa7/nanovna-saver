@@ -40,6 +40,17 @@ class MagnitudeZChart(FrequencyChart):
         self.minValue = 0
         self.maxValue = 1
         self.span = 1
+                # Default to logarithmic X-axis for LogMag charts
+        try:
+            self.setLogarithmicX(True)
+            # update menu checked state if actions exist
+            if hasattr(self, "action_set_logarithmic_x"):
+                self.action_set_logarithmic_x.setChecked(True)
+            if hasattr(self, "action_set_linear_x"):
+                self.action_set_linear_x.setChecked(False)
+        except Exception:
+            pass
+        
 
     def drawValues(self, qp: QtGui.QPainter):
         if not self.data and not self.reference:
