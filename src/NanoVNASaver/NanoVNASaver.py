@@ -81,6 +81,9 @@ import os
 from dataclasses import dataclass
 ####
 
+
+from .temperature_logging import TemperatureLoggingManager
+
 logger = logging.getLogger(__name__)
 
 WORKING_KILL_TIME_MS = 10 * 1000
@@ -95,6 +98,7 @@ class BatchSweepConfig:
     base_name: str
     rest_s: float
     count: int
+    save_temperature: bool = True
 
 class BatchSweepDialog(QtWidgets.QDialog):
     def __init__(self, parent=None, default_dir: str = "", default_base: str = "sweep"):
@@ -130,13 +134,18 @@ class BatchSweepDialog(QtWidgets.QDialog):
         self.count_spin.setValue(30)
         layout.addRow("Number of sweeps:", self.count_spin)
 
+        # Temperature logging
+        self.temp_checkbox = QtWidgets.QCheckBox("Save temperature log")
+        self.temp_checkbox.setChecked(True)
+        layout.addRow("Temperature:", self.temp_checkbox)
+
         # Buttons
         buttons = QtWidgets.QDialogButtonBox(
             QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel
         )
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
-        layout.addRow(buttons)
+        layout.addRow(buttons)        
 
     def _browse_dir(self):
         d = QtWidgets.QFileDialog.getExistingDirectory(self, "Select directory", self.dir_edit.text() or os.path.expanduser("~"))
@@ -148,8 +157,16 @@ class BatchSweepDialog(QtWidgets.QDialog):
         base = self.base_edit.text().strip() or "sweep"
         rest_s = float(self.rest_spin.value())
         count = int(self.count_spin.value())
-        return BatchSweepConfig(out_dir=out_dir, base_name=base, rest_s=rest_s, count=count)
-
+        # return BatchSweepConfig(out_dir=out_dir, base_name=base, rest_s=rest_s, count=count)
+        save_temperature = self.temp_checkbox.isChecked()
+        return BatchSweepConfig(
+                out_dir=out_dir,
+                base_name=base,
+                rest_s=rest_s,
+                count=count,
+                save_temperature=save_temperature,
+        )
+    
 class NanoVNASaver(QWidget):
     version = VERSION
     scale_factor = 1.0
@@ -221,6 +238,11 @@ class NanoVNASaver(QWidget):
         self._batch_active = False
         self._batch_cfg: BatchSweepConfig | None = None
         self._batch_index = 0
+
+        self.temperature_logger = TemperatureLoggingManager(
+            pico_port="/dev/serial/by-id/usb-MicroPython_Board_in_FS_mode_e664a836a33ba327-if00",
+            csv_path=""
+        )
 
         self.sweepSource = ""
         self.referenceSource = ""
@@ -565,6 +587,14 @@ class NanoVNASaver(QWidget):
 
         logger.debug("Finished building interface")
 
+        # self.temperature_logger = TemperatureLoggingManager(
+        #     pico_port="/dev/serial/by-id/usb-MicroPython_Board_in_FS_mode_e664a836a33ba327-if00",
+        #     csv_path=""
+        # )
+
+        # self.temperature_logging_enabled = True
+
+        
 
     def _restore_all_sweep_after_connect(self):
         try:
@@ -944,4 +974,42 @@ class NanoVNASaver(QWidget):
                     f"{dp11.freq} {dp11.re} {dp11.im} "
                     f"{dp21.re} {dp21.im} "
                     f"0 0 0 0\n"
+                )
+        # Temperature logging for batch sweep only
+        # if cfg.save_temperature:
+        #     self.temperature_logger.csv_path = os.path.join(
+        #         cfg.out_dir, "temperature_log.csv"
+        #     )
+
+        #     try:
+        #         result = self.temperature_logger.log_temperature_for_file(path)
+        #         if result is not None:
+        #             idx_logged, temp_c = result
+        #             logger.info(
+        #                 "Temperature logged: index=%s temp=%.4f C",
+        #                 idx_logged, temp_c
+        #             )
+        #     except Exception as exc:
+        #         self.showError(
+        #             f"Temperature logging failed for sweep {idx}: {exc}"
+        #         )
+        # Temperature logging for batch sweep only
+        if cfg.save_temperature:
+            self.temperature_logger.csv_path = os.path.join(
+                cfg.out_dir, f"{cfg.base_name}_temperature.csv"
+            )
+
+            try:
+                raw_data = self.temperature_logger.log_raw_for_file(path)
+                if raw_data is not None:
+                    logger.info(
+                        "Temperature logged: raw=%s resistance=%.6f temp=%s fault=%s",
+                        raw_data["raw"],
+                        raw_data["resistance_ohm"],
+                        raw_data["temp_c"],
+                        raw_data["fault"],
+                    )
+            except Exception as exc:
+                self.showError(
+                    f"Temperature logging failed for sweep {idx}: {exc}"
                 )
