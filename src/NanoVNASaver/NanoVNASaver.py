@@ -33,6 +33,7 @@ from .Charts import (
     GroupDelayChart,
     InductanceChart,
     LogMagChart,
+    LogMagPhaseChart,
     MagnitudeChart,
     MagnitudeZChart,
     MagnitudeZSeriesChart,
@@ -238,6 +239,8 @@ class NanoVNASaver(QWidget):
         self._batch_active = False
         self._batch_cfg: BatchSweepConfig | None = None
         self._batch_index = 0
+        self._batch_last_sweep_failed = False
+        self._batch_last_error_message = ""
 
         self.temperature_logger = TemperatureLoggingManager(
             pico_port="/dev/serial/by-id/usb-MicroPython_Board_in_FS_mode_e664a836a33ba327-if00",
@@ -279,6 +282,7 @@ class NanoVNASaver(QWidget):
                 "group_delay": GroupDelayChart("S11 Group Delay"),
                 "inductance": InductanceChart("S11 Serial L"),
                 "log_mag": LogMagChart("S11 Return Loss"),
+                "db_phase": LogMagPhaseChart("S11 db/phase"),
                 "magnitude": MagnitudeChart("|S11|"),
                 "magnitude_z": MagnitudeZChart("S11 |Z|"),
                 "permeability": PermeabilityChart(
@@ -301,6 +305,7 @@ class NanoVNASaver(QWidget):
                     "S21 Group Delay", reflective=False
                 ),
                 "log_mag": LogMagChart("S21 Gain"),
+                "db_phase": LogMagPhaseChart("S21 db/phase"),
                 "magnitude": MagnitudeChart("|S21|"),
                 "magnitude_z_shunt": MagnitudeZShuntChart("S21 |Z| shunt"),
                 "magnitude_z_series": MagnitudeZSeriesChart("S21 |Z| series"),
@@ -806,10 +811,32 @@ class NanoVNASaver(QWidget):
         QtWidgets.QMessageBox.warning(self, "Error", text)
 
     def showSweepError(self):
-        self.showError(self.worker.error_message)
-        with contextlib.suppress(IOError):
-            self.vna.flushSerialBuffers()  # Remove any left-over data
-            self.vna.reconnect()  # try reconnection
+        # self.showError(self.worker.error_message)
+        # with contextlib.suppress(IOError):
+        #     self.vna.flushSerialBuffers()  # Remove any left-over data
+        #     self.vna.reconnect()  # try reconnection
+        # self.sweepFinished()
+        
+        msg = self.worker.error_message or "Unknown sweep error"
+
+        # batch sweep中は止めずに記録して継続
+        if self._batch_active:
+            logger.warning("Batch sweep error: %s", msg)
+            self._batch_last_sweep_failed = True
+            self._batch_last_error_message = msg
+
+            with contextlib.suppress(IOError, Exception):
+                self.vna.flushSerialBuffers()
+                self.vna.reconnect()
+
+            self.sweepFinished()
+            return
+
+        # 通常 sweep は従来通り
+        self.showError(msg)
+        with contextlib.suppress(IOError, Exception):
+            self.vna.flushSerialBuffers()
+            self.vna.reconnect()
         self.sweepFinished()
 
     def popoutChart(self, chart: Chart):
@@ -925,19 +952,63 @@ class NanoVNASaver(QWidget):
         self._batch_index += 1
         self.sweep_start()
 
+    # def _on_sweep_finished_for_batch(self):
+        # # called on every sweep finish; only act if batch is active
+        # if not self._batch_active or not self._batch_cfg:
+        #     return
+
+        # try:
+        #     self._batch_save_current_touchstone()
+        # except Exception as exc:  # noqa: BLE001
+        #     self.showError(f"Failed saving sweep {self._batch_index}: {exc}")
+        #     self._batch_active = False
+        #     self.btn_batch_stop.setDisabled(True)
+        #     self.btn_batch_start.setDisabled(False)
+        #     return
+
+        # # schedule next sweep after rest time
+        # rest_ms = int(self._batch_cfg.rest_s * 1000)
+        # QtCore.QTimer.singleShot(rest_ms, self._batch_start_next)
     def _on_sweep_finished_for_batch(self):
         # called on every sweep finish; only act if batch is active
         if not self._batch_active or not self._batch_cfg:
             return
 
-        try:
-            self._batch_save_current_touchstone()
-        except Exception as exc:  # noqa: BLE001
-            self.showError(f"Failed saving sweep {self._batch_index}: {exc}")
-            self._batch_active = False
-            self.btn_batch_stop.setDisabled(True)
-            self.btn_batch_start.setDisabled(False)
-            return
+        if self._batch_last_sweep_failed:
+            logger.warning(
+                "Skipping save for failed sweep %d: %s",
+                self._batch_index,
+                self._batch_last_error_message,
+            )
+
+            # 失敗ログだけ残す
+            fail_log = os.path.join(
+                self._batch_cfg.out_dir,
+                f"{self._batch_cfg.base_name}_errors.csv"
+            )
+            new_file = not os.path.exists(fail_log)
+            with open(fail_log, "a", encoding="utf-8") as f:
+                if new_file:
+                    f.write("index,error\n")
+                f.write(f'{self._batch_index},"{self._batch_last_error_message}"\n')
+
+            self._batch_last_sweep_failed = False
+            self._batch_last_error_message = ""
+        else:
+            try:
+                self._batch_save_current_touchstone()
+            except Exception as exc:
+                logger.exception("Failed saving sweep %d", self._batch_index)
+
+                fail_log = os.path.join(
+                    self._batch_cfg.out_dir,
+                    f"{self._batch_cfg.base_name}_errors.csv"
+                )
+                new_file = not os.path.exists(fail_log)
+                with open(fail_log, "a", encoding="utf-8") as f:
+                    if new_file:
+                        f.write("index,error\n")
+                    f.write(f'{self._batch_index},"save failed: {exc}"\n')
 
         # schedule next sweep after rest time
         rest_ms = int(self._batch_cfg.rest_s * 1000)

@@ -5,6 +5,7 @@ from .Frequency import FrequencyChart
 from .GroupDelay import GroupDelayChart
 from .Inductance import InductanceChart
 from .LogMag import LogMagChart
+from .LogMagPhase import LogMagPhaseChart
 from .Magnitude import MagnitudeChart
 from .MagnitudeZ import MagnitudeZChart
 from .MagnitudeZSeries import MagnitudeZSeriesChart
@@ -32,6 +33,7 @@ __all__ = [
     "GroupDelayChart",
     "InductanceChart",
     "LogMagChart",
+    "LogMagPhaseChart",
     "MagnitudeChart",
     "MagnitudeZChart",
     "MagnitudeZSeriesChart",
