@@ -20,6 +20,8 @@ import contextlib
 import logging
 import threading
 from time import localtime, strftime
+import skrf as rf
+import numpy as np
 
 from PySide6 import QtCore, QtGui, QtWidgets
 from PySide6.QtCore import QObject
@@ -88,6 +90,83 @@ from .temperature_logging import TemperatureLoggingManager
 logger = logging.getLogger(__name__)
 
 WORKING_KILL_TIME_MS = 10 * 1000
+
+
+def get_S2P_nVNA(filename):
+    ntwk = rf.Network(filename)
+    ntwk = make_full_thru_network(ntwk)
+    ntwk = average_duplicate_freq(ntwk)
+    return ntwk
+
+def average_duplicate_freq(ntwk: rf.Network) -> rf.Network:
+    f = ntwk.frequency.f
+    idx_sort = np.argsort(f)
+    f = f[idx_sort]
+    s = ntwk.s[idx_sort]
+    # z0 = ntwk.z0[idx_sort]
+
+    uf, inv = np.unique(f, return_inverse=True)
+    s_out = np.zeros((len(uf),) + s.shape[1:], dtype=s.dtype)
+    # z0_out = np.zeros((len(uf),) + z0.shape[1:], dtype=z0.dtype)
+
+    for k in range(len(uf)):
+        m = (inv == k)
+        s_out[k] = s[m].mean(axis=0)
+        # z0_out[k] = z0[m].mean(axis=0)
+
+    return rf.Network(
+        frequency=rf.Frequency.from_f(uf, "Hz"),
+        s=s_out,
+        z0=50,
+        name=ntwk.name
+    )
+
+def make_full_thru_network(ntwk):
+    """Return a copy of `ntwk` with full 2x2 S-parameters."""
+    s = ntwk.s.copy()
+    n = s.shape[0]
+    s_full = np.zeros((n, 2, 2), dtype=complex)
+    # extract available elements (fall back to zeros if missing)
+    s11 = s[:, 0, 0] if s.shape[1] >= 2 else np.zeros(n, dtype=complex)
+    s21 = s[:, 1, 0] if s.shape[1] >= 2 else np.zeros(n, dtype=complex)
+    # assign symmetric/full values: S22 = S11, S12 = S21
+    s_full[:, 0, 0] = s11
+    s_full[:, 1, 1] = s11
+    s_full[:, 1, 0] = s21
+    s_full[:, 0, 1] = s21
+    nt = ntwk.copy()
+    nt.s = s_full
+    return nt
+
+
+calpath = '/home/keisuke/Documents/Spara/caldata/nanoVNAH4/20260325_nanoVNAH4_nocal_IF10Hz/'
+datalist = ['short','open','load','thru','1ohm']
+caldata = {}
+for k in datalist:
+    caldata[k] = {'ntwk': get_S2P_nVNA(f'{calpath}S_{k}.s2p')}
+
+freq = caldata['short']['ntwk'].frequency
+beta = 2*np.pi*freq.f / rf.c   # 自由空間の β（簡易）
+media = rf.DefinedGammaZ0(frequency=freq, z0=50, gamma=1j*beta)
+
+ideals = [media.short(nports=2), media.open(nports=2), media.match(nports=2), media.thru()]
+
+measured_thru  = caldata['thru']['ntwk']
+short_meas_2p = rf.two_port_reflect(caldata['short']['ntwk'].s11, caldata['short']['ntwk'].s11)
+open_meas_2p  = rf.two_port_reflect(caldata['open']['ntwk'].s11,  caldata['open']['ntwk'].s11)
+load_meas_2p  = rf.two_port_reflect(caldata['load']['ntwk'].s11,  caldata['load']['ntwk'].s11)
+measured = [short_meas_2p, open_meas_2p,load_meas_2p,measured_thru]# Idealsと同じ順番でリストにする
+
+cal = rf.SOLT(
+    ideals=ideals,
+    measured=measured,
+    n_ports=2,  # 2ポート校正であることを明示
+    # isolation=data['iso']['ntwk']
+        )
+
+
+
+
 
 
 class Communicate(QObject):
@@ -320,6 +399,11 @@ class NanoVNASaver(QWidget):
             "combined": {
                 "log_mag": CombinedLogMagChart("S11 & S21 LogMag"),
             },
+            "calibration": {
+                "S11_db_phase": LogMagPhaseChart("Cal S11 db/phase"),
+                "S21_db_phase": LogMagPhaseChart("Cal S21 db/phase"),
+                "real_imag_shunt": RealImaginaryZShuntChart("Cal S21 R+jX shunt"),
+            },
         }
         self.tdr_chart: TDRChart = TDRChart("TDR")
         self.tdr_mainwindow_chart = TDRChart("TDR")
@@ -333,11 +417,15 @@ class NanoVNASaver(QWidget):
         # List of all charts that use both S11 and S21
         self.combinedCharts = list(self.charts["combined"].values())
 
+        # List of all charts that use both S11 and S21
+        self.calibrationCharts = list(self.charts["calibration"].values())
+
         # List of all charts that can be selected for display
         self.selectable_charts = (
             self.s11charts
             + self.s21charts
             + self.combinedCharts
+            + self.calibrationCharts
             + [
                 self.tdr_mainwindow_chart,
             ]
@@ -699,9 +787,20 @@ class NanoVNASaver(QWidget):
                     self.delta_marker.updateLabels()
 
     def dataUpdated(self):
+    
         with self.dataLock:
             s11 = self.data.s11[:]
             s21 = self.data.s21[:]
+            ntwk = self.data.to_skrf_network()
+            ntwk = make_full_thru_network(ntwk)
+            ntwk = average_duplicate_freq(ntwk)
+            data_cal = cal.apply_cal(ntwk)
+            tscal = Touchstone()   
+            tscal.from_skrf_network(data_cal)
+            s11_cal = tscal.s11[:]
+            s21_cal = tscal.s21[:]
+            # print(ntwk.s[:,1,0],s21_cal[0])
+            
 
         for m in self.markers:
             m.resetLabels()
@@ -715,6 +814,14 @@ class NanoVNASaver(QWidget):
 
         for c in self.combinedCharts:
             c.setCombinedData(s11, s21)
+
+        # print("raw s11[0] =", s11[0])
+        # print("cal s11[0] =", s11_cal[0])
+        # print("raw s21[0] =", s21[0])
+        # print("cal s21[0] =", s21_cal[0])
+        self.calibrationCharts[0].setData(s11_cal)#'S11_db_phase'
+        self.calibrationCharts[1].setData(s21_cal)#S21_db_phase
+        self.calibrationCharts[2].setData(s21_cal)#real_imag_shunt
 
         self.sweep_control.progress_bar.setValue(int(self.worker.percentage))
         self.windows["tdr"].updateTDR()
@@ -759,6 +866,14 @@ class NanoVNASaver(QWidget):
             with self.dataLock:
                 s11 = self.data.s11[:]
                 s21 = self.data.s21[:]
+                ntwk = self.data.to_skrf_network()
+                ntwk = make_full_thru_network(ntwk)
+                ntwk = average_duplicate_freq(ntwk)
+                data_cal = cal.apply_cal(ntwk)
+                tscal = Touchstone()   
+                tscal.from_skrf_network(data_cal)
+                s11_cal = tscal.s11[:]
+                s21_cal = tscal.s21[:]
 
         self.ref_data.s11 = s11
         for c in self.s11charts:
@@ -770,6 +885,11 @@ class NanoVNASaver(QWidget):
 
         for c in self.combinedCharts:
             c.setCombinedReference(s11, s21)
+
+
+        self.calibrationCharts[0].setReference(s11_cal)#'S11_db_phase'
+        self.calibrationCharts[1].setReference(s21_cal)#S21_db_phase
+        self.calibrationCharts[2].setReference(s21_cal)#real_imag_shunt
 
         self.btnResetReference.setDisabled(False)
 
@@ -856,6 +976,8 @@ class NanoVNASaver(QWidget):
             self.s21charts.append(new_chart)
         if chart in self.combinedCharts:
             self.combinedCharts.append(new_chart)
+        if chart in self.calibrationCharts:
+            self.calibrationCharts.append(new_chart)
         new_chart.popout_requested.connect(self.popoutChart)
         return new_chart
 

@@ -19,12 +19,15 @@
 import cmath
 import math
 from typing import NamedTuple
+import skrf as rf
+import numpy as np
 
 from .SITools import Format, clamp_value
 
 FMT_FREQ = Format()
 FMT_SHORT = Format(max_nr_digits=4)
 FMT_SWEEP = Format(max_nr_digits=9, allow_strip=True)
+
 
 
 class Datapoint(NamedTuple):
@@ -60,6 +63,13 @@ class Datapoint(NamedTuple):
         return gamma_to_impedance(self.z, ref_impedance)
 
     def shuntImpedance(self, ref_impedance: float = 50) -> complex:
+        try:
+            # print(self.freq)
+            return 0.5 * ref_impedance * self.z / (1 - self.z)
+        except ZeroDivisionError:
+            return math.inf
+        
+    def shuntImpedanceCal(self, ref_impedance: float = 50) -> complex:
         try:
             return 0.5 * ref_impedance * self.z / (1 - self.z)
         except ZeroDivisionError:

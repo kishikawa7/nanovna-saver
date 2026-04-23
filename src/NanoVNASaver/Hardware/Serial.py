@@ -27,15 +27,45 @@ logger = logging.getLogger(__name__)
 def drain_serial(serial_port: serial.Serial):
     """drain up to 64k outstanding data in the serial incoming buffer"""
     # logger.debug("Draining: %s", serial_port)
-    timeout = serial_port.timeout
-    serial_port.timeout = 0.05
-    for _ in range(512):
-        cnt = len(serial_port.read(128))
-        if not cnt:
-            serial_port.timeout = timeout
+    # timeout = serial_port.timeout
+    # serial_port.timeout = 0.05
+    # for _ in range(512):
+    #     cnt = len(serial_port.read(128))
+    #     if not cnt:
+    #         serial_port.timeout = timeout
+    #         return
+    # serial_port.timeout = timeout
+    # logger.warning("unable to drain all data")
+    if serial_port is None:
+        return
+
+    try:
+        if not getattr(serial_port, "is_open", False):
             return
-    serial_port.timeout = timeout
-    logger.warning("unable to drain all data")
+    except Exception:
+        return
+
+    try:
+        old_timeout = serial_port.timeout
+        serial_port.timeout = 0.05
+    except Exception:
+        # 既にUSB切断/再enumeration中なら何もしない
+        return
+
+    try:
+        while True:
+            try:
+                data = serial_port.read(4096)
+            except Exception:
+                break
+            if not data:
+                break
+    finally:
+        try:
+            if getattr(serial_port, "is_open", False):
+                serial_port.timeout = old_timeout
+        except Exception:
+            pass
 
 
 class Interface(serial.Serial):

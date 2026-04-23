@@ -309,7 +309,7 @@ class RealImaginaryChart(FrequencyChart):
         min_imag = math.floor(min_imag)
 
         min_imag, max_imag = self.imag_scaling_constraints(min_imag, max_imag)
-        return min_real, max_real, min_imag, max_imag
+        return max(0,min_real), max_real, min_imag, max_imag
 
     def imag_scaling_constraints(self, min_imag, max_imag):
         if max_imag - min_imag < 8:
@@ -412,7 +412,7 @@ class RealImaginaryChart(FrequencyChart):
         if not selected:
             return
         if not (self.fixedValues and min_val >= self.maxDisplayReal):
-            self.minDisplayReal = min_val
+            self.minDisplayReal = max(0,min_val)
         if self.fixedValues:
             self.update()
 

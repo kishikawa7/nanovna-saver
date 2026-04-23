@@ -305,7 +305,130 @@ class Touchstone:
                 logger.warning("Reordering data")
                 for datalist in self.sdata:
                     datalist.sort(key=attrgetter("freq"))
+    
+    def to_skrf_network(self):
+        import numpy as np
+        import skrf as rf
 
+        if len(self.s11) == 0:
+            raise ValueError("No S-parameter data found.")
+
+        freq = np.array([dp.freq for dp in self.s11], dtype=float)
+
+        has_s21 = len(self.s21) == len(freq)
+        has_s12 = len(self.s12) == len(freq)
+        has_s22 = len(self.s22) == len(freq)
+
+        if has_s21:
+            s = np.zeros((len(freq), 2, 2), dtype=complex)
+            s[:, 0, 0] = [complex(dp.re, dp.im) for dp in self.s11]
+            s[:, 1, 0] = [complex(dp.re, dp.im) for dp in self.s21]
+
+            # 無ければ対称仮定で埋める
+            if has_s12:
+                s[:, 0, 1] = [complex(dp.re, dp.im) for dp in self.s12]
+            else:
+                s[:, 0, 1] = s[:, 1, 0]
+
+            if has_s22:
+                s[:, 1, 1] = [complex(dp.re, dp.im) for dp in self.s22]
+            else:
+                s[:, 1, 1] = s[:, 0, 0]
+
+            return rf.Network(
+                frequency=rf.Frequency.from_f(freq, unit="Hz"),
+                s=s,
+                z0=50,
+                name=self.filename,
+            )
+
+        else:
+            s = np.zeros((len(freq), 1, 1), dtype=complex)
+            s[:, 0, 0] = [complex(dp.re, dp.im) for dp in self.s11]
+            return rf.Network(
+                frequency=rf.Frequency.from_f(freq, unit="Hz"),
+                s=s,
+                z0=50,
+                name=self.filename,
+            )
+    
+    # def to_skrf_network(self):
+    #     import numpy as np
+    #     import skrf as rf
+
+    #     if len(self.s11) == 0:
+    #         raise ValueError("No S-parameter data found.")
+
+    #     freq = np.array([dp.freq for dp in self.s11], dtype=float)
+
+    #     available = {
+    #         "11": self.s11,
+    #         "21": self.s21,
+    #         "12": self.s12,
+    #         "22": self.s22,
+    #     }
+
+    #     for name, data in available.items():
+    #         if len(data) > 0:
+    #             f_chk = np.array([dp.freq for dp in data], dtype=float)
+    #             if len(f_chk) != len(freq) or not np.array_equal(f_chk, freq):
+    #                 raise ValueError(f"Frequency grid mismatch in s{name}.")
+
+    #     has_2port = all(len(available[k]) == len(freq) for k in ("11", "21", "12", "22"))
+
+    #     if has_2port:
+    #         s = np.zeros((len(freq), 2, 2), dtype=complex)
+    #         s[:, 0, 0] = [complex(dp.re, dp.im) for dp in self.s11]
+    #         s[:, 1, 0] = [complex(dp.re, dp.im) for dp in self.s21]
+    #         s[:, 0, 1] = [complex(dp.re, dp.im) for dp in self.s12]
+    #         s[:, 1, 1] = [complex(dp.re, dp.im) for dp in self.s22]
+    #         z0 = self.r * np.ones((len(freq), 2), dtype=complex)
+    #     else:
+    #         s = np.zeros((len(freq), 1, 1), dtype=complex)
+    #         s[:, 0, 0] = [complex(dp.re, dp.im) for dp in self.s11]
+    #         z0 = self.r * np.ones((len(freq), 1), dtype=complex)
+
+    #     return rf.Network(
+    #         frequency=rf.Frequency.from_f(freq, unit="Hz"),
+    #         s=s,
+    #         name=self.filename,
+    #     )
+
+    def from_skrf_network(self, ntwk):
+        """
+        Populate this Touchstone object from a scikit-rf Network.
+        Supports 1-port or 2-port network.
+        """
+        from .RFTools import Datapoint
+
+        freq = ntwk.frequency.f
+        s = ntwk.s
+
+        self.sdata = [[], [], [], []]
+
+        if s.ndim != 3:
+            raise ValueError(f"Unexpected s shape: {s.shape}")
+
+        nfreq, nport, nport2 = s.shape
+        if nport != nport2:
+            raise ValueError(f"Non-square S matrix: {s.shape}")
+
+        if nport == 1:
+            for i in range(nfreq):
+                self.s11.append(Datapoint(int(round(freq[i])), s[i, 0, 0].real, s[i, 0, 0].imag))
+
+        elif nport == 2:
+            for i in range(nfreq):
+                f = int(round(freq[i]))
+                self.s11.append(Datapoint(f, s[i, 0, 0].real, s[i, 0, 0].imag))
+                self.s21.append(Datapoint(f, s[i, 1, 0].real, s[i, 1, 0].imag))
+                self.s12.append(Datapoint(f, s[i, 0, 1].real, s[i, 0, 1].imag))
+                self.s22.append(Datapoint(f, s[i, 1, 1].real, s[i, 1, 1].imag))
+            # print(s[0, 0, 0].real, s[0, 0, 0].imag)
+            # print(self.s11[0])
+        else:
+            raise ValueError(f"Only 1-port or 2-port networks are supported, got {nport} ports.")
+    
     def save(self, nr_params: int = 1):
         """Save touchstone data to file.
 

@@ -306,8 +306,6 @@ class LogMagPhaseChart(FrequencyChart):
             min_db = min(min_db, db)
             max_phase = max(max_phase, phase)
             min_phase = min(min_phase, phase)
-            # print(phase)
-        print(max_phase,min_phase,phase)
         # Also check min/max for the reference sweep
         for d in self.reference:
             if d.freq < self.fstart or d.freq > self.fstop:
@@ -330,7 +328,6 @@ class LogMagPhaseChart(FrequencyChart):
             min_db=-100
         max_phase = math.ceil(max_phase)
         min_phase = math.floor(min_phase)
-        print('after',max_phase,min_phase,phase)
         # min_phase, max_phase = self.imag_scaling_constraints(min_phase, max_phase)
         return min_db, max_db, min_phase, max_phase
 
