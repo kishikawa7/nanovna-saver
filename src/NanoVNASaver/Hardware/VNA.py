@@ -41,6 +41,7 @@ DISLORD_BW = {
     4000: 0,
 }
 WAIT = 0.05
+MIN_COMMAND_WAIT = 0.20
 
 
 def _max_retries(bandwidth: int, datapoints: int) -> int:
@@ -49,6 +50,13 @@ def _max_retries(bandwidth: int, datapoints: int) -> int:
         + 20 * (datapoints / 101)
         + (1000 / bandwidth) ** 1.30 * (datapoints / 101)
     )
+
+
+def _command_wait(command: str, bandwidth: int, datapoints: int) -> float:
+    if not command.startswith(("scan ", "sweep ")):
+        return WAIT
+    point_time = max(1 / max(bandwidth, 1), WAIT)
+    return max(MIN_COMMAND_WAIT, min(2.0, point_time * datapoints / 4))
 
 class VNACommandRetryExceeded(Exception):
     """一時的な通信失敗。アプリ全体は止めない。"""
@@ -151,6 +159,7 @@ class VNA:
             except Exception as e:
                 raise VNACommandRetryExceeded(f"{command}: write failed: {e}") from e
 
+            wait = max(wait, _command_wait(command, self.bandwidth, self.datapoints))
             sleep(wait)
 
             retries = 0
@@ -181,7 +190,7 @@ class VNA:
                 if not line:
                     retries += 1
                     if retries > max_retries:
-                        logger.warning("exec_command(%s): too many retries", command)
+                        logger.debug("exec_command(%s): too many retries", command)
                         raise VNACommandRetryExceeded(f"{command}: too many retries")
                     sleep(wait)
                     continue

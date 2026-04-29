@@ -29,6 +29,8 @@ from skrf.frequency import InvalidFrequencyWarning
 from skrf.media.media import DefinedGammaZ0
 from skrf.network import two_port_reflect
 
+warnings.filterwarnings("ignore", category=InvalidFrequencyWarning)
+
 from PySide6 import QtCore, QtGui, QtWidgets
 from PySide6.QtCore import QObject
 from PySide6.QtWidgets import QWidget
@@ -728,10 +730,10 @@ class NanoVNASaver(QWidget):
         width = int(app_config.gui.window_width)
         height = int(app_config.gui.window_height)
         if not (MIN_WINDOW_WIDTH <= width <= max_width):
-            logger.warning("Ignoring invalid saved window width: %s", width)
+            logger.debug("Ignoring invalid saved window width: %s", width)
             width = min(default.width(), max_width)
         if not (MIN_WINDOW_HEIGHT <= height <= max_height):
-            logger.warning("Ignoring invalid saved window height: %s", height)
+            logger.debug("Ignoring invalid saved window height: %s", height)
             height = min(default.height(), max_height)
         return width, height
 
@@ -745,8 +747,11 @@ class NanoVNASaver(QWidget):
 
             # 2) デバイス側に周波数レンジだけは必ず再適用（points設定APIは無いので不要）
             self.vna.resetSweep(int(self.sweep.start), int(self.sweep.end))
-            # IF bandwidth を強制設定
-            self.vna.bandwidth = 100
+            if "Bandwidth" in self.vna.features:
+                try:
+                    self.vna.set_bandwidth(100)
+                except Exception as e:
+                    logger.debug("Failed to set IF bandwidth after connect: %s", e)
 
             # 3) UI側も復元した sweep に揃える（存在する関数だけ呼ぶ）
             for name in ("updateInputs", "sync_from_sweep", "set_sweep", "update_from_sweep"):

@@ -50,7 +50,7 @@ class NanoVNA(VNA):
             frequencies = super().readValues("frequencies")
             return int(frequencies[0].real), int(frequencies[-1].real)
         except serial.SerialException as e:
-            logger.warning("%s reading frequencies", e)
+            logger.debug("%s reading frequencies", e)
             logger.info("falling back to generic")
 
         return VNA._get_running_frequencies(self)
@@ -115,7 +115,7 @@ class NanoVNA(VNA):
             list(self.exec_command(f"sweep {start} {stop} {self.datapoints}"))
             list(self.exec_command("resume"))
         except Exception as e:
-            logger.warning("resetSweep(%s, %s) failed: %s", start, stop, e)
+            logger.debug("resetSweep(%s, %s) failed: %s", start, stop, e)
             self._recover_after_comm_failure()
         # list(self.exec_command(f"sweep {start} {stop} {self.datapoints}"))
         # list(self.exec_command("resume"))
@@ -129,7 +129,7 @@ class NanoVNA(VNA):
             elif self.sweep_method == "scan":
                 list(self.exec_command(f"scan {start} {stop} {self.datapoints}"))
         except Exception as e:
-            logger.warning("setSweep(%s, %s) failed: %s", start, stop, e)
+            logger.debug("setSweep(%s, %s) failed: %s", start, stop, e)
             self._recover_after_comm_failure()
         # if self.sweep_method == "sweep":
         #     list(self.exec_command(f"sweep {start} {stop} {self.datapoints}"))
@@ -152,19 +152,21 @@ class NanoVNA(VNA):
             try:
                 return super().read_frequencies()
             except Exception as e:
-                logger.warning("read_frequencies() failed in base implementation: %s", e)
+                logger.debug("read_frequencies() failed in base implementation: %s", e)
                 self._recover_after_comm_failure()
                 return self._fallback_frequencies()
 
         try:
-            result = [
-                int(line)
-                for line in self.exec_command(
-                    f"scan {self.start} {self.stop} {self.datapoints} 0b001"
-                )
-            ]
+            result = []
+            for line in self.exec_command(
+                f"scan {self.start} {self.stop} {self.datapoints} 0b001"
+            ):
+                try:
+                    result.append(int(line))
+                except ValueError:
+                    logger.debug("read_frequencies: ignoring non-frequency line: %r", line)
         except Exception as e:
-            logger.warning(
+            logger.debug(
                 "read_frequencies(scan %s %s %s 0b001) failed: %s",
                 self.start, self.stop, self.datapoints, e
             )
@@ -172,7 +174,7 @@ class NanoVNA(VNA):
             return self._fallback_frequencies()
 
         if len(result) != self.datapoints:
-            logger.warning(
+            logger.debug(
                 "read_frequencies: got %s points, expected %s",
                 len(result), self.datapoints
             )
@@ -195,7 +197,7 @@ class NanoVNA(VNA):
             try:
                 return super().readValues(value)
             except Exception as e:
-                logger.warning("readValues(%s) failed in base implementation: %s", value, e)
+                logger.debug("readValues(%s) failed in base implementation: %s", value, e)
                 self._recover_after_comm_failure()
                 return []
 
@@ -215,7 +217,7 @@ class NanoVNA(VNA):
                 )
             )
         except Exception as e:
-            logger.warning(
+            logger.debug(
                 "readValues(data 0) scan failed (%s-%s, %s pts): %s",
                 self.start, self.stop, self.datapoints, e
             )
@@ -223,14 +225,14 @@ class NanoVNA(VNA):
 
             # 失敗時は前回データを返す
             if old_sweepdata:
-                logger.warning("readValues(data 0): using previous sweepdata")
+                logger.debug("readValues(data 0): using previous sweepdata")
                 self._sweepdata = old_sweepdata
                 return [x[0] for x in self._sweepdata]
 
             return []
 
         if len(lines) != self.datapoints:
-            logger.warning(
+            logger.debug(
                 "readValues(data 0): got %s lines, expected %s",
                 len(lines), self.datapoints
             )
@@ -238,7 +240,7 @@ class NanoVNA(VNA):
 
             # 点数不足でも前回データを返す
             if old_sweepdata:
-                logger.warning("readValues(data 0): using previous sweepdata")
+                logger.debug("readValues(data 0): using previous sweepdata")
                 self._sweepdata = old_sweepdata
                 return [x[0] for x in self._sweepdata]
 
@@ -254,12 +256,12 @@ class NanoVNA(VNA):
                     (complex(d[0], d[1]), complex(d[2], d[3]))
                 )
         except Exception as e:
-            logger.warning("readValues(data 0): parse failed: %s", e)
+            logger.debug("readValues(data 0): parse failed: %s", e)
             self._recover_after_comm_failure()
 
             # parse失敗でも前回データを返す
             if old_sweepdata:
-                logger.warning("readValues(data 0): using previous sweepdata")
+                logger.debug("readValues(data 0): using previous sweepdata")
                 self._sweepdata = old_sweepdata
                 return [x[0] for x in self._sweepdata]
 
