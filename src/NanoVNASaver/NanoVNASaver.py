@@ -19,9 +19,15 @@
 import contextlib
 import logging
 import threading
+import warnings
 from time import localtime, strftime
 import skrf as rf
 import numpy as np
+from skrf.calibration import SOLT
+from skrf.constants import c as RF_C
+from skrf.frequency import InvalidFrequencyWarning
+from skrf.media.media import DefinedGammaZ0
+from skrf.network import two_port_reflect
 
 from PySide6 import QtCore, QtGui, QtWidgets
 from PySide6.QtCore import QObject
@@ -58,6 +64,7 @@ from .Controls.MarkerControl import MarkerControl
 from .Controls.SerialControl import SerialControl
 from .Controls.SweepControl import SweepControl
 from .Defaults import APP_SETTINGS, AppSettings, get_app_config
+from .FileDialogs import get_existing_directory
 from .Formatting import format_frequency, format_gain, format_vswr
 from .Hardware.Hardware import Interface
 from .Hardware.VNA import VNA
@@ -90,10 +97,14 @@ from .temperature_logging import TemperatureLoggingManager
 logger = logging.getLogger(__name__)
 
 WORKING_KILL_TIME_MS = 10 * 1000
+MIN_WINDOW_WIDTH = 800
+MIN_WINDOW_HEIGHT = 600
 
 
 def get_S2P_nVNA(filename):
-    ntwk = rf.Network(filename)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", InvalidFrequencyWarning)
+        ntwk = rf.Network(filename)
     ntwk = make_full_thru_network(ntwk)
     ntwk = average_duplicate_freq(ntwk)
     return ntwk
@@ -139,25 +150,26 @@ def make_full_thru_network(ntwk):
     return nt
 
 
-calpath = '/home/keisuke/Documents/Spara/caldata/nanoVNAH4/20260325_nanoVNAH4_nocal_IF10Hz/'
-datalist = ['short','open','load','thru','1ohm']
+# calpath = '/home/keisuke/Documents/Spara/caldata/nanoVNAH4/20260325_nanoVNAH4_nocal_IF10Hz/'
+calpath = '/home/keisuke/Documents/Spara/caldata/nanoVNAH4/20260424_nanoVNAH4_DCcut/'
+datalist = ['short','open','load','thru']
 caldata = {}
 for k in datalist:
     caldata[k] = {'ntwk': get_S2P_nVNA(f'{calpath}S_{k}.s2p')}
 
 freq = caldata['short']['ntwk'].frequency
-beta = 2*np.pi*freq.f / rf.c   # 自由空間の β（簡易）
-media = rf.DefinedGammaZ0(frequency=freq, z0=50, gamma=1j*beta)
+beta = 2*np.pi*freq.f / RF_C   # 自由空間の β（簡易）
+media = DefinedGammaZ0(frequency=freq, z0=50, gamma=1j*beta)
 
 ideals = [media.short(nports=2), media.open(nports=2), media.match(nports=2), media.thru()]
 
 measured_thru  = caldata['thru']['ntwk']
-short_meas_2p = rf.two_port_reflect(caldata['short']['ntwk'].s11, caldata['short']['ntwk'].s11)
-open_meas_2p  = rf.two_port_reflect(caldata['open']['ntwk'].s11,  caldata['open']['ntwk'].s11)
-load_meas_2p  = rf.two_port_reflect(caldata['load']['ntwk'].s11,  caldata['load']['ntwk'].s11)
+short_meas_2p = two_port_reflect(caldata['short']['ntwk'].s11, caldata['short']['ntwk'].s11)
+open_meas_2p  = two_port_reflect(caldata['open']['ntwk'].s11,  caldata['open']['ntwk'].s11)
+load_meas_2p  = two_port_reflect(caldata['load']['ntwk'].s11,  caldata['load']['ntwk'].s11)
 measured = [short_meas_2p, open_meas_2p,load_meas_2p,measured_thru]# Idealsと同じ順番でリストにする
 
-cal = rf.SOLT(
+cal = SOLT(
     ideals=ideals,
     measured=measured,
     n_ports=2,  # 2ポート校正であることを明示
@@ -227,8 +239,20 @@ class BatchSweepDialog(QtWidgets.QDialog):
         buttons.rejected.connect(self.reject)
         layout.addRow(buttons)        
 
+    # def _browse_dir(self):
+    #     d = QtWidgets.QFileDialog.getExistingDirectory(self, "Select directory", self.dir_edit.text() or os.path.expanduser("~"))
+    #     if d:
+    #         self.dir_edit.setText(d)
+
     def _browse_dir(self):
-        d = QtWidgets.QFileDialog.getExistingDirectory(self, "Select directory", self.dir_edit.text() or os.path.expanduser("~"))
+        start_dir = self.dir_edit.text() or os.path.expanduser("~")
+
+        d = get_existing_directory(
+            self,
+            "Select directory",
+            start_dir,
+        )
+
         if d:
             self.dir_edit.setText(d)
 
@@ -342,7 +366,7 @@ class NanoVNASaver(QWidget):
         outer.addWidget(scrollarea)
         self.setLayout(outer)
         scrollarea.setWidgetResizable(True)
-        self.resize(app_config.gui.window_width, app_config.gui.window_height)
+        self.resize(*self._safe_initial_window_size(app_config))
         scrollarea.setSizePolicy(
             QtWidgets.QSizePolicy.Policy.MinimumExpanding,
             QtWidgets.QSizePolicy.Policy.MinimumExpanding,
@@ -457,7 +481,8 @@ class NanoVNASaver(QWidget):
         self.splitter.addWidget(self.marker_frame)
         self.splitter.addWidget(chart_widget)
 
-        self.splitter.restoreState(app_config.gui.splitter_sizes)
+        if not self.splitter.restoreState(app_config.gui.splitter_sizes):
+            self.splitter.setSizes([220, 900])
 
         layout.addLayout(left_column)
         layout.addWidget(self.splitter, 2)
@@ -688,6 +713,27 @@ class NanoVNASaver(QWidget):
         # self.temperature_logging_enabled = True
 
         
+
+    def _safe_initial_window_size(self, app_config) -> tuple[int, int]:
+        default = self.sizeHint()
+        screen = QtWidgets.QApplication.primaryScreen()
+        if screen is not None:
+            available = screen.availableGeometry()
+            max_width = max(default.width(), available.width())
+            max_height = max(default.height(), available.height())
+        else:
+            max_width = 3840
+            max_height = 2160
+
+        width = int(app_config.gui.window_width)
+        height = int(app_config.gui.window_height)
+        if not (MIN_WINDOW_WIDTH <= width <= max_width):
+            logger.warning("Ignoring invalid saved window width: %s", width)
+            width = min(default.width(), max_width)
+        if not (MIN_WINDOW_HEIGHT <= height <= max_height):
+            logger.warning("Ignoring invalid saved window height: %s", height)
+            height = min(default.height(), max_height)
+        return width, height
 
     def _restore_all_sweep_after_connect(self):
         try:

@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
+from ..FileDialogs import get_open_file_name, safe_file_dialog
 from ..RFTools import Datapoint
 from ..Touchstone import Touchstone
 from .Defaults import make_scrollable
@@ -88,7 +89,7 @@ class FilesWindow(QtWidgets.QWidget):
             )
             return
 
-        filedialog = QtWidgets.QFileDialog(self)
+        filedialog = safe_file_dialog(self)
         if nr_params == 1:
             filedialog.setDefaultSuffix("s1p")
             filedialog.setNameFilter(
@@ -122,7 +123,7 @@ class FilesWindow(QtWidgets.QWidget):
             return
 
     def loadReferenceFile(self):
-        filename, _ = QtWidgets.QFileDialog.getOpenFileName(
+        filename, _ = get_open_file_name(
             filter="Touchstone Files (*.s1p *.s2p);;All files (*.*)"
         )
         if filename != "":
@@ -132,7 +133,7 @@ class FilesWindow(QtWidgets.QWidget):
             self.app.setReference(t.s11, t.s21, filename)
 
     def loadSweepFile(self):
-        filename, _ = QtWidgets.QFileDialog.getOpenFileName(
+        filename, _ = get_open_file_name(
             filter="Touchstone Files (*.s1p *.s2p);;All files (*.*)"
         )
         if filename != "":

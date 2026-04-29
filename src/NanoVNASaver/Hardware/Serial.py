@@ -44,19 +44,20 @@ def drain_serial(serial_port: serial.Serial):
             return
     except Exception:
         return
-
+    old_timeout = None
     try:
         old_timeout = serial_port.timeout
         serial_port.timeout = 0.05
-    except Exception:
-        # 既にUSB切断/再enumeration中なら何もしない
+    except Exception as e:
+        logger.warning("drain_serial: failed to set timeout: %s", e)
         return
 
     try:
         while True:
             try:
                 data = serial_port.read(4096)
-            except Exception:
+            except Exception as e:
+                logger.warning("drain_serial: read failed: %s", e)
                 break
             if not data:
                 break
@@ -64,8 +65,8 @@ def drain_serial(serial_port: serial.Serial):
         try:
             if getattr(serial_port, "is_open", False):
                 serial_port.timeout = old_timeout
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("drain_serial: failed to restore timeout: %s", e)
 
 
 class Interface(serial.Serial):

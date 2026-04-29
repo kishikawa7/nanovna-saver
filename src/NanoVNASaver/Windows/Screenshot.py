@@ -21,6 +21,8 @@ from typing import Optional
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
+from ..FileDialogs import get_save_file_name
+
 # from .ui import get_window_icon
 
 logger = logging.getLogger(__name__)
@@ -90,7 +92,7 @@ class ScreenshotWindow(QtWidgets.QLabel):
     def saveScreenshot(self):
         if self.pix is not None:
             logger.info("Saving screenshot to file...")
-            filename, _ = QtWidgets.QFileDialog.getSaveFileName(
+            filename, _ = get_save_file_name(
                 parent=self,
                 caption="Save image",
                 filter="PNG (*.png);;All files (*.*)",

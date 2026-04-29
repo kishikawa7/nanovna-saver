@@ -27,9 +27,19 @@ resulting data.
 
 import argparse
 import logging
+import os
 import sys
 
-from PySide6 import QtWidgets
+_qt_logging_rules = os.environ.get("QT_LOGGING_RULES", "")
+_svg_draw_rule = "qt.svg.draw=false"
+if _svg_draw_rule not in _qt_logging_rules.split(";"):
+    os.environ["QT_LOGGING_RULES"] = (
+        f"{_qt_logging_rules};{_svg_draw_rule}"
+        if _qt_logging_rules
+        else _svg_draw_rule
+    )
+
+from PySide6 import QtGui, QtWidgets
 
 from NanoVNASaver import NanoVNASaver
 from NanoVNASaver.About import INFO, VERSION
@@ -102,6 +112,10 @@ def main():
     logger.info("Startup...")
 
     app = QtWidgets.QApplication(sys.argv)
+    QtGui.QIcon.setThemeName("")
+    if "Fusion" in QtWidgets.QStyleFactory.keys():
+        app.setStyle("Fusion")
+
     window = NanoVNASaver()
     window.show()
 

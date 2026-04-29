@@ -25,6 +25,7 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QAction, QColor, QColorConstants
 
 from ..Defaults import get_app_config
+from ..FileDialogs import get_save_file_name
 from ..Marker.Widget import Marker
 from ..RFTools import Datapoint
 
@@ -154,6 +155,11 @@ class Chart(QtWidgets.QWidget):
         self.addAction(self.action_save_screenshot)
 
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.ActionsContextMenu)
+
+    def _valid_size(self) -> bool:
+        w = self.width()
+        h = self.height()
+        return 0 < w < 5000 and 0 < h < 5000
 
     def _x_transform(self, f_hz: float) -> float:
         """周波数(Hz)→描画用のx値"""
@@ -309,19 +315,36 @@ class Chart(QtWidgets.QWidget):
         raise NotImplementedError()
 
     def saveScreenshot(self) -> None:
+        if not self._valid_size():
+            logger.warning("Skip saveScreenshot: invalid size %sx%s", self.width(), self.height())
+            return
+
         logger.info("Saving %s to file...", self.name)
-        filename, _ = QtWidgets.QFileDialog.getSaveFileName(
+        filename, _ = get_save_file_name(
             parent=self,
             caption="Save image",
             filter="PNG (*.png);;All files (*.*)",
         )
 
-        logger.debug("Filename: %s", filename)
         if not filename:
             return
         if not QtCore.QFileInfo(filename).suffix():
             filename += ".png"
+
         self.grab().save(filename)
+        # logger.info("Saving %s to file...", self.name)
+        # filename, _ = QtWidgets.QFileDialog.getSaveFileName(
+        #     parent=self,
+        #     caption="Save image",
+        #     filter="PNG (*.png);;All files (*.*)",
+        # )
+
+        # logger.debug("Filename: %s", filename)
+        # if not filename:
+        #     return
+        # if not QtCore.QFileInfo(filename).suffix():
+        #     filename += ".png"
+        # self.grab().save(filename)
 
     def copy(self) -> "Chart":
         new_chart = self.__class__(self.name)
@@ -371,10 +394,18 @@ class Chart(QtWidgets.QWidget):
         qp.drawText(position, self.sweepTitle)
 
     def update(self, a=None, b=None, c=None, d=None) -> None:  # pylint: disable=unused-argument
+        if not self._valid_size():
+            logger.warning("Skip update: invalid size %sx%s", self.width(), self.height())
+            return
+
         pal = self.palette()
         pal.setColor(QtGui.QPalette.ColorRole.Window, Chart.color.background)
         self.setPalette(pal)
         super().update()
+        # pal = self.palette()
+        # pal.setColor(QtGui.QPalette.ColorRole.Window, Chart.color.background)
+        # self.setPalette(pal)
+        # super().update()
 
     def drawDragbog(self, qp: QtGui.QPainter):
         dashed_pen = QtGui.QPen(Chart.color.foreground, 1, Qt.PenStyle.DashLine)

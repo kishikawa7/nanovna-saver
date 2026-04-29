@@ -23,6 +23,7 @@ from functools import partial
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from ..Calibration import Calibration
+from ..FileDialogs import get_open_file_name, safe_file_dialog
 from ..Settings.Sweep import SweepMode
 from ..Touchstone import Touchstone
 from .Defaults import make_scrollable
@@ -706,7 +707,7 @@ class CalibrationWindow(QtWidgets.QWidget):
         self.app.sweep_control.update_text()
 
     def loadCalibration(self):
-        filename, _ = QtWidgets.QFileDialog.getOpenFileName(
+        filename, _ = get_open_file_name(
             filter="Calibration Files (*.cal);;All files (*.*)"
         )
         if filename:
@@ -735,7 +736,7 @@ class CalibrationWindow(QtWidgets.QWidget):
             logger.debug("Attempted to save an uncalculated calibration.")
             self.app.showError("Cannot save an unapplied calibration state.")
             return
-        filedialog = QtWidgets.QFileDialog(self)
+        filedialog = safe_file_dialog(self)
         filedialog.setDefaultSuffix("cal")
         filedialog.setNameFilter("Calibration Files (*.cal);;All files (*.*)")
         filedialog.setAcceptMode(QtWidgets.QFileDialog.AcceptMode.AcceptSave)
@@ -1044,7 +1045,7 @@ class CalibrationWindow(QtWidgets.QWidget):
             return
 
     def select_file_open(self):
-        filename, _ = QtWidgets.QFileDialog.getOpenFileName(
+        filename, _ = get_open_file_name(
             self, "Select Open S1P", "", "Touchstone Files (*.s1p)"
         )
         if filename != "":
@@ -1052,7 +1053,7 @@ class CalibrationWindow(QtWidgets.QWidget):
             self.open_touchstone.load()
 
     def select_file_short(self):
-        filename, _ = QtWidgets.QFileDialog.getOpenFileName(
+        filename, _ = get_open_file_name(
             self, "Select Short S1P", "", "Touchstone Files (*.s1p)"
         )
         if filename != "":
@@ -1060,7 +1061,7 @@ class CalibrationWindow(QtWidgets.QWidget):
             self.short_touchstone.load()
 
     def select_file_load(self):
-        filename, _ = QtWidgets.QFileDialog.getOpenFileName(
+        filename, _ = get_open_file_name(
             self, "Select Load S1P", "", "Touchstone Files (*.s1p)"
         )
         if filename != "":

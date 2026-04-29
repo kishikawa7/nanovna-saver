@@ -300,9 +300,6 @@
            <property name="text">
             <string>Copy</string>
            </property>
-           <property name="icon">
-            <iconset theme="QIcon::ThemeIcon::EditCopy"/>
-           </property>
           </widget>
          </item>
         </layout>

@@ -164,9 +164,6 @@ class Ui_DialogAbout(object):
         self.btn_copy_runtime_info.setObjectName(u"btn_copy_runtime_info")
         sizePolicy2.setHeightForWidth(self.btn_copy_runtime_info.sizePolicy().hasHeightForWidth())
         self.btn_copy_runtime_info.setSizePolicy(sizePolicy2)
-        icon1 = QIcon(QIcon.fromTheme(QIcon.ThemeIcon.EditCopy))
-        self.btn_copy_runtime_info.setIcon(icon1)
-
         self.horizontalLayout.addWidget(self.btn_copy_runtime_info)
 
 
@@ -215,4 +212,3 @@ class Ui_DialogAbout(object):
 "<p style=\"-qt-paragraph-type:empty; margin-top:0px; margin-bottom:0px; margin-left:0px; margin-r"
                         "ight:0px; -qt-block-indent:0; text-indent:0px;\"><br /></p></body></html>", None))
     # retranslateUi
-

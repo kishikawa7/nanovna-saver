@@ -94,6 +94,11 @@ class LogMagPhaseChart(FrequencyChart):
         return new_chart
 
     def drawValues(self, qp: QtGui.QPainter) -> None:
+        w = self.width()
+        h = self.height()
+        if w <= 0 or h <= 0 or w > 5000 or h > 5000:
+            logger.warning("Skip drawValues: invalid widget size %sx%s", w, h)
+            return
         if not self.data and not self.reference:
             return
 
@@ -505,18 +510,18 @@ class LogMagPhaseChart(FrequencyChart):
         self.action_set_fixed_stop.setText(
             f"Stop ({format_frequency_chart(self.maxFrequency)})"
         )
-        self.action_set_fixed_minimum_db.setText(
-            f"Minimum R ({self.minDisplayDB})"
-        )
-        self.action_set_fixed_maximum_db.setText(
-            f"Maximum R ({self.maxDisplayDB})"
-        )
-        self.action_set_fixed_minimum_phase.setText(
-            f"Minimum jX ({self.minDisplayPhase})"
-        )
-        self.action_set_fixed_maximum_phase.setText(
-            f"Maximum jX ({self.maxDisplayPhase})"
-        )
+        # self.action_set_fixed_minimum_db.setText(
+        #     f"Minimum R ({self.minDisplayDB})"
+        # )
+        # self.action_set_fixed_maximum_db.setText(
+        #     f"Maximum R ({self.maxDisplayDB})"
+        # )
+        # self.action_set_fixed_minimum_phase.setText(
+        #     f"Minimum jX ({self.minDisplayPhase})"
+        # )
+        # self.action_set_fixed_maximum_phase.setText(
+        #     f"Maximum jX ({self.maxDisplayPhase})"
+        # )
         self.menu.exec(event.globalPos())
 
 

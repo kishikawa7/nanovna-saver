@@ -151,6 +151,7 @@ class SerialControl(Control):
 
         self.app.windows["sweep_settings"].vna_connected()
 
+
         # logger.debug("Starting initial sweep")
         # self.app.sweep_start()
 

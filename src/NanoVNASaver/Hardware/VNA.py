@@ -50,6 +50,9 @@ def _max_retries(bandwidth: int, datapoints: int) -> int:
         + (1000 / bandwidth) ** 1.30 * (datapoints / 101)
     )
 
+class VNACommandRetryExceeded(Exception):
+    """一時的な通信失敗。アプリ全体は止めない。"""
+    pass
 
 class VNA:
     name = "VNA"
@@ -101,30 +104,136 @@ class VNA:
         self.connect()
         sleep(WAIT)
 
+    # def exec_command(self, command: str, wait: float = WAIT) -> Iterator[str]:
+    #     logger.debug("exec_command(%s)", command)
+    #     with self.serial.lock:
+    #         drain_serial(self.serial)
+    #         self.serial.write(f"{command}\r".encode("ascii"))
+    #         sleep(wait)
+    #         retries = 0
+    #         max_retries = _max_retries(self.bandwidth, self.datapoints)
+    #         logger.debug("Max retries: %s", max_retries)
+    #         while True:
+    #             line = self.serial.readline().decode("ascii").strip()
+    #             if not line:
+    #                 retries += 1
+    #                 if retries > max_retries:
+    #                     raise IOError("too many retries")
+    #                 sleep(wait)
+    #                 continue
+    #             if line == command:  # suppress echo
+    #                 continue
+    #             if line.startswith("ch>"):
+    #                 logger.debug("Needed retries: %s", retries)
+    #                 break
+    #             yield line
     def exec_command(self, command: str, wait: float = WAIT) -> Iterator[str]:
         logger.debug("exec_command(%s)", command)
-        with self.serial.lock:
-            drain_serial(self.serial)
-            self.serial.write(f"{command}\r".encode("ascii"))
+
+        ser = self.serial
+        if ser is None:
+            raise VNACommandRetryExceeded(f"{command}: serial is None")
+
+        try:
+            if not ser.is_open:
+                raise VNACommandRetryExceeded(f"{command}: serial is not open")
+        except Exception as e:
+            raise VNACommandRetryExceeded(f"{command}: failed to check serial state: {e}") from e
+
+        with ser.lock:
+            try:
+                drain_serial(ser)
+            except Exception as e:
+                raise VNACommandRetryExceeded(f"{command}: drain_serial failed: {e}") from e
+
+            try:
+                ser.write(f"{command}\r".encode("ascii"))
+            except Exception as e:
+                raise VNACommandRetryExceeded(f"{command}: write failed: {e}") from e
+
             sleep(wait)
+
             retries = 0
             max_retries = _max_retries(self.bandwidth, self.datapoints)
             logger.debug("Max retries: %s", max_retries)
+            if command.startswith("scan "):
+                try:
+                    parts = command.split()
+                    start = int(parts[1])
+                    if start <= 1000000:
+                        wait = max(wait, 0.7)
+                        max_retries += 120
+                except (IndexError, ValueError):
+                    pass
+
+            logger.debug("Max retries: %s", max_retries)
             while True:
-                line = self.serial.readline().decode("ascii").strip()
+                try:
+                    raw = ser.readline()
+                except Exception as e:
+                    raise VNACommandRetryExceeded(f"{command}: readline failed: {e}") from e
+
+                try:
+                    line = raw.decode("ascii", errors="ignore").strip()
+                except Exception as e:
+                    raise VNACommandRetryExceeded(f"{command}: decode failed: {e}") from e
+
                 if not line:
                     retries += 1
                     if retries > max_retries:
-                        raise IOError("too many retries")
+                        logger.warning("exec_command(%s): too many retries", command)
+                        raise VNACommandRetryExceeded(f"{command}: too many retries")
                     sleep(wait)
                     continue
+
                 if line == command:  # suppress echo
                     continue
+
                 if line.startswith("ch>"):
                     logger.debug("Needed retries: %s", retries)
-                    break
-                yield line
+                    return
 
+                yield line
+        # logger.debug("exec_command(%s)", command)
+        # try:
+        #     with self.serial.lock:
+        #         try:
+        #             drain_serial(self.serial)
+        #             self.serial.write(f"{command}\r".encode("ascii"))
+        #         except Exception as e:
+        #             logger.warning("exec_command(%s): serial write/drain failed: %s", command, e)
+        #             return
+
+        #         sleep(wait)
+        #         retries = 0
+        #         max_retries = _max_retries(self.bandwidth, self.datapoints)
+        #         logger.debug("Max retries: %s", max_retries)
+
+        #         while True:
+        #             try:
+        #                 line = self.serial.readline().decode("ascii", errors="ignore").strip()
+        #             except Exception as e:
+        #                 logger.warning("exec_command(%s): readline failed: %s", command, e)
+        #                 return
+
+        #             if not line:
+        #                 retries += 1
+        #                 if retries > max_retries:
+        #                     logger.warning("exec_command(%s): too many retries", command)
+        #                     return
+        #                 sleep(wait)
+        #                 continue
+
+        #             if line == command:
+        #                 continue
+        #             if line.startswith("ch>"):
+        #                 logger.debug("Needed retries: %s", retries)
+        #                 return
+        #             yield line
+        # except Exception as e:
+        #     logger.warning("exec_command(%s): unexpected error: %s", command, e)
+        #     return
+    
     def init_features(self) -> None:
         result = " ".join(self.exec_command("help")).split()
         logger.debug("result:\n%s", result)
@@ -184,7 +293,13 @@ class VNA:
         return self.features
 
     def getCalibration(self) -> str:
-        return " ".join(list(self.exec_command("cal")))
+        # return " ".join(list(self.exec_command("cal")))
+        try:
+            resp = list(self.exec_command("cal"))
+            return " ".join(resp) if resp else "N/A"
+        except Exception as e:
+            logger.warning("getCalibration failed: %s", e)
+            return "N/A"
 
     def getScreenshot(self) -> QtGui.QPixmap:
         return QtGui.QPixmap()

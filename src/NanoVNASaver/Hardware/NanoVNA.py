@@ -17,6 +17,7 @@
 #  You should have received a copy of the GNU General Public License
 #  along with this program.  If not, see <https://www.gnu.org/licenses/>.
 import logging
+from time import sleep
 
 import serial
 from PySide6.QtGui import QPixmap
@@ -54,6 +55,34 @@ class NanoVNA(VNA):
 
         return VNA._get_running_frequencies(self)
 
+    def _recover_after_comm_failure(self) -> None:
+        ser = getattr(self, "serial", None)
+        if ser is None:
+            return
+
+        try:
+            if not ser.is_open:
+                return
+        except Exception:
+            return
+
+        try:
+            ser.reset_input_buffer()
+        except Exception as e:
+            logger.debug("reset_input_buffer failed: %s", e)
+
+        try:
+            ser.reset_output_buffer()
+        except Exception as e:
+            logger.debug("reset_output_buffer failed: %s", e)
+
+        try:
+            drain_serial(ser)
+        except Exception as e:
+            logger.debug("drain_serial after failure failed: %s", e)
+
+        sleep(0.2)
+
     def _capture_data(self) -> bytes:
         timeout = self.serial.timeout
         with self.serial.lock:
@@ -82,16 +111,30 @@ class NanoVNA(VNA):
         return QPixmap()
 
     def resetSweep(self, start: int, stop: int):
-        list(self.exec_command(f"sweep {start} {stop} {self.datapoints}"))
-        list(self.exec_command("resume"))
+        try:
+            list(self.exec_command(f"sweep {start} {stop} {self.datapoints}"))
+            list(self.exec_command("resume"))
+        except Exception as e:
+            logger.warning("resetSweep(%s, %s) failed: %s", start, stop, e)
+            self._recover_after_comm_failure()
+        # list(self.exec_command(f"sweep {start} {stop} {self.datapoints}"))
+        # list(self.exec_command("resume"))
 
     def setSweep(self, start, stop):
         self.start = start
         self.stop = stop
-        if self.sweep_method == "sweep":
-            list(self.exec_command(f"sweep {start} {stop} {self.datapoints}"))
-        elif self.sweep_method == "scan":
-            list(self.exec_command(f"scan {start} {stop} {self.datapoints}"))
+        try:
+            if self.sweep_method == "sweep":
+                list(self.exec_command(f"sweep {start} {stop} {self.datapoints}"))
+            elif self.sweep_method == "scan":
+                list(self.exec_command(f"scan {start} {stop} {self.datapoints}"))
+        except Exception as e:
+            logger.warning("setSweep(%s, %s) failed: %s", start, stop, e)
+            self._recover_after_comm_failure()
+        # if self.sweep_method == "sweep":
+        #     list(self.exec_command(f"sweep {start} {stop} {self.datapoints}"))
+        # elif self.sweep_method == "scan":
+        #     list(self.exec_command(f"scan {start} {stop} {self.datapoints}"))
 
     def init_features(self) -> None:
         super().init_features()
@@ -103,34 +146,124 @@ class NanoVNA(VNA):
             logger.debug("Using new scan command.")
             self.features.add("Scan command")
             self.sweep_method = "scan"
-
+                
     def read_frequencies(self) -> list[int]:
-        logger.debug("readFrequencies: %s", self.sweep_method)
         if self.sweep_method != "scan_mask":
-            return super().read_frequencies()
-        return [
-            int(line)
-            for line in self.exec_command(
-                f"scan {self.start} {self.stop} {self.datapoints} 0b001"
+            try:
+                return super().read_frequencies()
+            except Exception as e:
+                logger.warning("read_frequencies() failed in base implementation: %s", e)
+                self._recover_after_comm_failure()
+                return self._fallback_frequencies()
+
+        try:
+            result = [
+                int(line)
+                for line in self.exec_command(
+                    f"scan {self.start} {self.stop} {self.datapoints} 0b001"
+                )
+            ]
+        except Exception as e:
+            logger.warning(
+                "read_frequencies(scan %s %s %s 0b001) failed: %s",
+                self.start, self.stop, self.datapoints, e
             )
-        ]
+            self._recover_after_comm_failure()
+            return self._fallback_frequencies()
+
+        if len(result) != self.datapoints:
+            logger.warning(
+                "read_frequencies: got %s points, expected %s",
+                len(result), self.datapoints
+            )
+            self._recover_after_comm_failure()
+            return self._fallback_frequencies()
+
+        return result
+
+
+    def _fallback_frequencies(self) -> list[int]:
+        if self.datapoints <= 1:
+            return [int(self.start)]
+
+        step = (self.stop - self.start) / (self.datapoints - 1)
+        return [int(self.start + i * step) for i in range(self.datapoints)]
+
 
     def readValues(self, value) -> list[complex]:
         if self.sweep_method != "scan_mask":
-            return super().readValues(value)
+            try:
+                return super().readValues(value)
+            except Exception as e:
+                logger.warning("readValues(%s) failed in base implementation: %s", value, e)
+                self._recover_after_comm_failure()
+                return []
+
         logger.debug("readValue with scan mask (%s)", value)
-        # Actually grab the data only when requesting channel 0.
-        # The hardware will return all channels which we will store.
-        if value == "data 0":
-            self._sweepdata = []
-            for line in self.exec_command(
-                f"scan {self.start} {self.stop} {self.datapoints} 0b110"
-            ):
-                d = list(map(float, line.split()))
-                self._sweepdata.append(
-                    (complex(d[0], d[1]), complex(d[2], d[3]))
-                )
+
+        # data 1 は、直前の data 0 scan で保存した値を返すだけ
         if value == "data 1":
             return [x[1] for x in self._sweepdata]
-        # default to data 0
+
+        # data 0 以外も data 0 として扱う
+        old_sweepdata = list(self._sweepdata)
+
+        try:
+            lines = list(
+                self.exec_command(
+                    f"scan {self.start} {self.stop} {self.datapoints} 0b110"
+                )
+            )
+        except Exception as e:
+            logger.warning(
+                "readValues(data 0) scan failed (%s-%s, %s pts): %s",
+                self.start, self.stop, self.datapoints, e
+            )
+            self._recover_after_comm_failure()
+
+            # 失敗時は前回データを返す
+            if old_sweepdata:
+                logger.warning("readValues(data 0): using previous sweepdata")
+                self._sweepdata = old_sweepdata
+                return [x[0] for x in self._sweepdata]
+
+            return []
+
+        if len(lines) != self.datapoints:
+            logger.warning(
+                "readValues(data 0): got %s lines, expected %s",
+                len(lines), self.datapoints
+            )
+            self._recover_after_comm_failure()
+
+            # 点数不足でも前回データを返す
+            if old_sweepdata:
+                logger.warning("readValues(data 0): using previous sweepdata")
+                self._sweepdata = old_sweepdata
+                return [x[0] for x in self._sweepdata]
+
+            return []
+
+        new_sweepdata = []
+        try:
+            for line in lines:
+                d = list(map(float, line.split()))
+                if len(d) < 4:
+                    raise ValueError(f"not enough columns in line: {line!r}")
+                new_sweepdata.append(
+                    (complex(d[0], d[1]), complex(d[2], d[3]))
+                )
+        except Exception as e:
+            logger.warning("readValues(data 0): parse failed: %s", e)
+            self._recover_after_comm_failure()
+
+            # parse失敗でも前回データを返す
+            if old_sweepdata:
+                logger.warning("readValues(data 0): using previous sweepdata")
+                self._sweepdata = old_sweepdata
+                return [x[0] for x in self._sweepdata]
+
+            return []
+
+        self._sweepdata = new_sweepdata
         return [x[0] for x in self._sweepdata]
