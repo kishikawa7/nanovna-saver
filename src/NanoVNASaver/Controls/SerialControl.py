@@ -16,6 +16,7 @@
 #
 #  You should have received a copy of the GNU General Public License
 #  along with this program.  If not, see <https://www.gnu.org/licenses/>.
+import contextlib
 import logging
 from time import sleep
 from typing import TYPE_CHECKING
@@ -73,6 +74,11 @@ class SerialControl(Control):
         button_layout.addWidget(self.btn_settings, stretch=0)
         self.layout.addRow(button_layout)
 
+        self.btn_reboot = QtWidgets.QPushButton("Reboot device")
+        self.btn_reboot.setMinimumHeight(20)
+        self.btn_reboot.clicked.connect(self.app.reboot_vna_power)
+        self.layout.addRow(self.btn_reboot)
+
         # Assuming serial is disconnected
         self.update_settings_state(False)
 
@@ -83,6 +89,14 @@ class SerialControl(Control):
         for iface in get_interfaces():
             self.inp_port.insertItem(1, f"{iface}", iface)
         self.inp_port.repaint()
+
+    def select_port(self, port: str) -> bool:
+        for index in range(self.inp_port.count()):
+            iface = self.inp_port.itemData(index)
+            if getattr(iface, "port", None) == port:
+                self.inp_port.setCurrentIndex(index)
+                return True
+        return False
 
     def serialButtonClick(self):
         if not self.app.vna.connected():
@@ -111,8 +125,12 @@ class SerialControl(Control):
         sleep(0.1)
         try:
             self.app.vna = get_VNA(self.interface)
-        except IOError as exc:
+        except Exception as exc:
             logger.error("Unable to connect to VNA: %s", exc)
+            with contextlib.suppress(Exception):
+                self.interface.close()
+            self.connected.emit(False)
+            return
 
         self.app.vna.validateInput = self.app.settings.value(
             "SerialInputValidation", False, bool
@@ -126,8 +144,8 @@ class SerialControl(Control):
 
         try:
             frequencies = self.app.vna.read_frequencies()
-        except ValueError:
-            logger.warning("No frequencies read")
+        except Exception as exc:
+            logger.warning("No frequencies read: %s", exc)
             return
         logger.info(
             "Read starting frequency %s and end frequency %s",
@@ -169,6 +187,11 @@ class SerialControl(Control):
 
             self.connected.emit(False)
 
+    def mark_disconnected(self) -> None:
+        self.btn_toggle.setText("Connect to device")
+        self.btn_toggle.repaint()
+        self.connected.emit(False)
+
     def update_connect_btn_state(self) -> None:
         # Eanble Connect/Dicsonnect button only if:
         # a) serial was already connected
@@ -182,4 +205,5 @@ class SerialControl(Control):
     def update_settings_state(self, was_connected: bool) -> None:
         self.btn_rescan.setEnabled(not was_connected)
         self.btn_settings.setEnabled(was_connected)
+        self.btn_reboot.setEnabled(was_connected)
         self.update_connect_btn_state()

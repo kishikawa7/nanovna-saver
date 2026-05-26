@@ -16,15 +16,16 @@
 #
 #  You should have received a copy of the GNU General Public License
 #  along with this program.  If not, see <https://www.gnu.org/licenses/>.
+import contextlib
 import logging
-from time import sleep
+from time import monotonic, sleep
 from typing import TYPE_CHECKING
 
 import numpy as np
 from PySide6.QtCore import QObject, QThread, Signal, Slot
 
 from .Calibration import correct_delay
-from .Hardware.VNA import VNA
+from .Hardware.VNA import VNA, VNACommandRetryExceeded
 from .RFTools import Datapoint
 from .Settings.Sweep import Sweep, SweepMode
 
@@ -34,8 +35,9 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 VALUE_MAX: float = 9.5
-RETRIES_RECONNECT: int = 5
+RETRIES_RECONNECT: int = 3
 RETRIES_MAX: int = 10
+SEGMENT_TIMEOUT_S: float = 120.0
 
 
 def truncate(values: list[list[complex]], count: int) -> list[list[complex]]:
@@ -92,7 +94,7 @@ class SweepWorker(QThread):
         except BaseException as exc:  # pylint: disable=broad-except
             logger.exception("%s", exc)
             self.gui_error(f"ERROR during sweep\n\nStopped\n\n{exc}")
-            if logger.isEnabledFor(logging.DEBUG):
+            if logger.isEnabledFor(logging.DEBUG) and not self.app._batch_active:
                 raise exc
 
     def _run(self) -> None:
@@ -106,7 +108,6 @@ class SweepWorker(QThread):
         self.percentage = 0.0
 
         sweep = self.app.sweep.copy()
-
         if sweep != self.sweep:  # parameters changed
             self.sweep = sweep
             self.init_data()
@@ -233,6 +234,10 @@ class SweepWorker(QThread):
 
         return data11, data21
 
+    def _note_activity(self) -> None:
+        with contextlib.suppress(Exception):
+            self.app._note_batch_worker_activity()
+
     def read_averaged_segment(
         self, start: int, stop: int, averages: int = 1
     ) -> tuple[list[int], list[complex], list[complex]]:
@@ -256,11 +261,40 @@ class SweepWorker(QThread):
             tmp_11: list[complex] = []
             tmp_21: list[complex] = []
             while retries and not tmp_11:
+                self._note_activity()
                 if retries < RETRIES_RECONNECT:
                     logger.warning("retry readSegment(%s,%s)", start, stop)
                     sleep(0.5)
+                    self._note_activity()
                 retries -= 1
-                freq, tmp_11, tmp_21 = self.read_segment(start, stop)
+                segment_started = monotonic()
+                try:
+                    freq, tmp_11, tmp_21 = self.read_segment(start, stop)
+                except VNACommandRetryExceeded as exc:
+                    logger.warning(
+                        "readSegment(%s,%s) communication failed: %s",
+                        start,
+                        stop,
+                        exc,
+                    )
+                    with contextlib.suppress(Exception):
+                        self.app.vna.reconnect()
+                    self._note_activity()
+                    if retries:
+                        sleep(2.0)
+                        self._note_activity()
+                        continue
+                    raise
+                elapsed = monotonic() - segment_started
+                if elapsed > SEGMENT_TIMEOUT_S:
+                    logger.warning(
+                        "readSegment(%s,%s) took %.1fs; reconnecting",
+                        start,
+                        stop,
+                        elapsed,
+                    )
+                    with contextlib.suppress(Exception):
+                        self.app.vna.reconnect()
 
             if not tmp_11:
                 raise IOError("Invalid data during sweep")

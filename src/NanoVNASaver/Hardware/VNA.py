@@ -17,7 +17,8 @@
 #  You should have received a copy of the GNU General Public License
 #  along with this program.  If not, see <https://www.gnu.org/licenses/>.
 import logging
-from time import sleep
+from contextlib import suppress
+from time import monotonic, sleep
 from typing import Iterator
 
 from PySide6 import QtGui
@@ -42,6 +43,8 @@ DISLORD_BW = {
 }
 WAIT = 0.05
 MIN_COMMAND_WAIT = 0.20
+COMMAND_TIMEOUT = 35.0
+RECONNECT_SETTLE_TIME = 1.0
 
 
 def _max_retries(bandwidth: int, datapoints: int) -> int:
@@ -72,6 +75,7 @@ class VNA:
     sweep_points_min = 11
 
     # Must be initilized in child classes
+    sweep_min_freq_hz = 1
     sweep_max_freq_hz = 0.0
 
     def __init__(self, iface: Interface):
@@ -104,13 +108,41 @@ class VNA:
     def disconnect(self):
         logger.info("disconnect %s", self.serial)
         with self.serial.lock:
+            with suppress(Exception):
+                self.serial.cancel_read()
+            with suppress(Exception):
+                self.serial.cancel_write()
             self.serial.close()
 
     def reconnect(self):
-        self.disconnect()
-        sleep(WAIT)
-        self.connect()
-        sleep(WAIT)
+        logger.info("reconnect %s", self.serial)
+        with self.serial.lock:
+            with suppress(Exception):
+                self.serial.cancel_read()
+            with suppress(Exception):
+                self.serial.cancel_write()
+            with suppress(Exception):
+                if self.serial.is_open:
+                    self.serial.close()
+
+            sleep(RECONNECT_SETTLE_TIME)
+            self.serial.open()
+
+            # Some NanoVNA CDC endpoints keep the old command state until the
+            # host drops and restores modem control lines after a long idle.
+            with suppress(Exception):
+                self.serial.dtr = False
+                self.serial.rts = False
+            sleep(0.1)
+            with suppress(Exception):
+                self.serial.dtr = True
+                self.serial.rts = True
+
+            sleep(RECONNECT_SETTLE_TIME)
+            with suppress(Exception):
+                self.serial.reset_input_buffer()
+            with suppress(Exception):
+                self.serial.reset_output_buffer()
 
     # def exec_command(self, command: str, wait: float = WAIT) -> Iterator[str]:
     #     logger.debug("exec_command(%s)", command)
@@ -149,18 +181,28 @@ class VNA:
             raise VNACommandRetryExceeded(f"{command}: failed to check serial state: {e}") from e
 
         with ser.lock:
+            old_timeout = getattr(ser, "timeout", None)
+            old_write_timeout = getattr(ser, "write_timeout", None)
             try:
                 drain_serial(ser)
             except Exception as e:
                 raise VNACommandRetryExceeded(f"{command}: drain_serial failed: {e}") from e
 
             try:
+                ser.write_timeout = 5
                 ser.write(f"{command}\r".encode("ascii"))
             except Exception as e:
+                with suppress(Exception):
+                    ser.timeout = old_timeout
+                with suppress(Exception):
+                    ser.write_timeout = old_write_timeout
                 raise VNACommandRetryExceeded(f"{command}: write failed: {e}") from e
 
             wait = max(wait, _command_wait(command, self.bandwidth, self.datapoints))
             sleep(wait)
+            poll_wait = min(wait, 0.2)
+            deadline = monotonic() + COMMAND_TIMEOUT
+            ser.timeout = max(0.05, poll_wait)
 
             retries = 0
             max_retries = _max_retries(self.bandwidth, self.datapoints)
@@ -176,33 +218,39 @@ class VNA:
                     pass
 
             logger.debug("Max retries: %s", max_retries)
-            while True:
-                try:
-                    raw = ser.readline()
-                except Exception as e:
-                    raise VNACommandRetryExceeded(f"{command}: readline failed: {e}") from e
+            try:
+                while True:
+                    try:
+                        raw = ser.readline()
+                    except Exception as e:
+                        raise VNACommandRetryExceeded(f"{command}: readline failed: {e}") from e
 
-                try:
-                    line = raw.decode("ascii", errors="ignore").strip()
-                except Exception as e:
-                    raise VNACommandRetryExceeded(f"{command}: decode failed: {e}") from e
+                    try:
+                        line = raw.decode("ascii", errors="ignore").strip()
+                    except Exception as e:
+                        raise VNACommandRetryExceeded(f"{command}: decode failed: {e}") from e
 
-                if not line:
-                    retries += 1
-                    if retries > max_retries:
-                        logger.debug("exec_command(%s): too many retries", command)
-                        raise VNACommandRetryExceeded(f"{command}: too many retries")
-                    sleep(wait)
-                    continue
+                    if not line:
+                        retries += 1
+                        if retries > max_retries or monotonic() > deadline:
+                            logger.debug("exec_command(%s): too many retries", command)
+                            raise VNACommandRetryExceeded(f"{command}: command timeout")
+                        sleep(poll_wait)
+                        continue
 
-                if line == command:  # suppress echo
-                    continue
+                    if line == command:  # suppress echo
+                        continue
 
-                if line.startswith("ch>"):
-                    logger.debug("Needed retries: %s", retries)
-                    return
+                    if line.startswith("ch>"):
+                        logger.debug("Needed retries: %s", retries)
+                        return
 
-                yield line
+                    yield line
+            finally:
+                with suppress(Exception):
+                    ser.timeout = old_timeout
+                with suppress(Exception):
+                    ser.write_timeout = old_write_timeout
         # logger.debug("exec_command(%s)", command)
         # try:
         #     with self.serial.lock:
@@ -322,6 +370,15 @@ class VNA:
             self.serial.reset_input_buffer()
             self.serial.reset_output_buffer()
             sleep(0.1)
+
+    def power_reset(self):
+        """Send the NanoVNA shell reset command without waiting for a prompt."""
+        if not self.connected():
+            raise IOError("VNA is not connected")
+        with self.serial.lock:
+            drain_serial(self.serial)
+            self.serial.write("reset\r".encode("ascii"))
+            self.serial.flush()
 
     def readFirmware(self) -> str:
         result = "\n".join(list(self.exec_command("info")))

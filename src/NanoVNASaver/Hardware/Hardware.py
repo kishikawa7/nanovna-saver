@@ -117,9 +117,17 @@ def get_interfaces() -> list[Interface]:
         )
         iface = Interface("serial", typename)
         iface.port = d.device
-        iface.open()
-        iface.comment = get_comment(iface)
-        iface.close()
+        try:
+            iface.open()
+            iface.comment = get_comment(iface)
+        except Exception as exc:
+            logger.warning("Skipping unresponsive VNA port %s: %s", d.device, exc)
+            continue
+        finally:
+            try:
+                iface.close()
+            except Exception:
+                pass
         interfaces.append(iface)
 
     logger.debug("Interfaces: %s", interfaces)

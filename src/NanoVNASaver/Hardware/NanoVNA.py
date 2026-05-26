@@ -29,6 +29,19 @@ from .VNA import VNA
 
 logger = logging.getLogger(__name__)
 
+HARD_COMM_FAILURE_TEXT = (
+    "Input/output error",
+    "Write timeout",
+    "device disconnected",
+    "multiple access on port",
+    "Could not configure port",
+    "write failed",
+)
+
+
+def _is_hard_comm_failure(exc: Exception) -> bool:
+    return any(text in str(exc) for text in HARD_COMM_FAILURE_TEXT)
+
 
 class NanoVNA(VNA):
     name = "NanoVNA"
@@ -117,6 +130,8 @@ class NanoVNA(VNA):
         except Exception as e:
             logger.debug("resetSweep(%s, %s) failed: %s", start, stop, e)
             self._recover_after_comm_failure()
+            if _is_hard_comm_failure(e):
+                raise
         # list(self.exec_command(f"sweep {start} {stop} {self.datapoints}"))
         # list(self.exec_command("resume"))
 
@@ -131,6 +146,8 @@ class NanoVNA(VNA):
         except Exception as e:
             logger.debug("setSweep(%s, %s) failed: %s", start, stop, e)
             self._recover_after_comm_failure()
+            if _is_hard_comm_failure(e):
+                raise
         # if self.sweep_method == "sweep":
         #     list(self.exec_command(f"sweep {start} {stop} {self.datapoints}"))
         # elif self.sweep_method == "scan":
@@ -156,32 +173,7 @@ class NanoVNA(VNA):
                 self._recover_after_comm_failure()
                 return self._fallback_frequencies()
 
-        try:
-            result = []
-            for line in self.exec_command(
-                f"scan {self.start} {self.stop} {self.datapoints} 0b001"
-            ):
-                try:
-                    result.append(int(line))
-                except ValueError:
-                    logger.debug("read_frequencies: ignoring non-frequency line: %r", line)
-        except Exception as e:
-            logger.debug(
-                "read_frequencies(scan %s %s %s 0b001) failed: %s",
-                self.start, self.stop, self.datapoints, e
-            )
-            self._recover_after_comm_failure()
-            return self._fallback_frequencies()
-
-        if len(result) != self.datapoints:
-            logger.debug(
-                "read_frequencies: got %s points, expected %s",
-                len(result), self.datapoints
-            )
-            self._recover_after_comm_failure()
-            return self._fallback_frequencies()
-
-        return result
+        return self._fallback_frequencies()
 
 
     def _fallback_frequencies(self) -> list[int]:
@@ -222,6 +214,12 @@ class NanoVNA(VNA):
                 self.start, self.stop, self.datapoints, e
             )
             self._recover_after_comm_failure()
+            if _is_hard_comm_failure(e):
+                self._sweepdata = []
+                raise
+            if "command timeout" in str(e):
+                self._sweepdata = []
+                raise
 
             # 失敗時は前回データを返す
             if old_sweepdata:

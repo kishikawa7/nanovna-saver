@@ -20,7 +20,7 @@ import contextlib
 import logging
 import threading
 import warnings
-from time import localtime, strftime
+from time import localtime, monotonic, strftime
 import skrf as rf
 import numpy as np
 from skrf.calibration import SOLT
@@ -101,6 +101,14 @@ logger = logging.getLogger(__name__)
 WORKING_KILL_TIME_MS = 10 * 1000
 MIN_WINDOW_WIDTH = 800
 MIN_WINDOW_HEIGHT = 600
+BATCH_SWEEP_STALL_TIMEOUT_S = 180
+BATCH_WATCHDOG_INTERVAL_MS = 30 * 1000
+BATCH_CONNECTION_REFRESH_SWEEPS = 100
+BATCH_CONNECTION_REFRESH_INTERVAL_S = 60 * 60
+BATCH_ERROR_RECOVERY_COOLDOWN_MS = 15 * 1000
+BATCH_MAX_RECOVERY_FAILURES = 2
+REBOOT_RECONNECT_INTERVAL_MS = 1000
+REBOOT_RECONNECT_ATTEMPTS = 20
 
 
 def get_S2P_nVNA(filename):
@@ -192,6 +200,7 @@ class BatchSweepConfig:
     base_name: str
     rest_s: float
     count: int
+    reboot_every: int
     save_temperature: bool = True
 
 class BatchSweepDialog(QtWidgets.QDialog):
@@ -228,6 +237,12 @@ class BatchSweepDialog(QtWidgets.QDialog):
         self.count_spin.setValue(30)
         layout.addRow("Number of sweeps:", self.count_spin)
 
+        # Reboot interval
+        self.reboot_every_spin = QtWidgets.QSpinBox()
+        self.reboot_every_spin.setRange(1, 10_000_000)
+        self.reboot_every_spin.setValue(100)
+        layout.addRow("Reboot every N sweeps:", self.reboot_every_spin)
+
         # Temperature logging
         self.temp_checkbox = QtWidgets.QCheckBox("Save temperature log")
         self.temp_checkbox.setChecked(True)
@@ -263,6 +278,7 @@ class BatchSweepDialog(QtWidgets.QDialog):
         base = self.base_edit.text().strip() or "sweep"
         rest_s = float(self.rest_spin.value())
         count = int(self.count_spin.value())
+        reboot_every = int(self.reboot_every_spin.value())
         # return BatchSweepConfig(out_dir=out_dir, base_name=base, rest_s=rest_s, count=count)
         save_temperature = self.temp_checkbox.isChecked()
         return BatchSweepConfig(
@@ -270,6 +286,7 @@ class BatchSweepDialog(QtWidgets.QDialog):
                 base_name=base,
                 rest_s=rest_s,
                 count=count,
+                reboot_every=reboot_every,
                 save_temperature=save_temperature,
         )
     
@@ -288,13 +305,7 @@ class NanoVNASaver(QWidget):
         self.threadpool = QtCore.QThreadPool()
         self.sweep = Sweep()
         self.worker = SweepWorker(self)
-
-        self.worker.signals.updated.connect(self.dataUpdated)
-        self.worker.signals.finished.connect(self.sweepFinished)
-
-        self.worker.signals.finished.connect(self._on_sweep_finished_for_batch)  
-
-        self.worker.signals.sweep_error.connect(self.showSweepError)
+        self._connect_worker_signals()
 
         self.markers: list[Marker] = []
         self.marker_ref = False
@@ -346,6 +357,15 @@ class NanoVNASaver(QWidget):
         self._batch_index = 0
         self._batch_last_sweep_failed = False
         self._batch_last_error_message = ""
+        self._batch_last_connection_refresh_at = monotonic()
+        self._batch_needs_recovery_cooldown = False
+        self._batch_recovery_failures = 0
+        self._batch_watchdog_progress = -1.0
+        self._batch_watchdog_changed_at = monotonic()
+        self._batch_reconnect_port: str | None = None
+        self._batch_watchdog = QtCore.QTimer(self)
+        self._batch_watchdog.setInterval(BATCH_WATCHDOG_INTERVAL_MS)
+        self._batch_watchdog.timeout.connect(self._batch_watchdog_tick)
 
         self.temperature_logger = TemperatureLoggingManager(
             pico_port="/dev/serial/by-id/usb-MicroPython_Board_in_FS_mode_e664a836a33ba327-if00",
@@ -716,6 +736,12 @@ class NanoVNASaver(QWidget):
 
         
 
+    def _connect_worker_signals(self) -> None:
+        self.worker.signals.updated.connect(self.dataUpdated)
+        self.worker.signals.finished.connect(self.sweepFinished)
+        self.worker.signals.finished.connect(self._on_sweep_finished_for_batch)
+        self.worker.signals.sweep_error.connect(self.showSweepError)
+
     def _safe_initial_window_size(self, app_config) -> tuple[int, int]:
         default = self.sizeHint()
         screen = QtWidgets.QApplication.primaryScreen()
@@ -749,7 +775,7 @@ class NanoVNASaver(QWidget):
             self.vna.resetSweep(int(self.sweep.start), int(self.sweep.end))
             if "Bandwidth" in self.vna.features:
                 try:
-                    self.vna.set_bandwidth(100)
+                    self.vna.set_bandwidth(self.vna.bandwidth)
                 except Exception as e:
                     logger.debug("Failed to set IF bandwidth after connect: %s", e)
 
@@ -778,6 +804,9 @@ class NanoVNASaver(QWidget):
         # Run the device data update
         if not self.vna.connected():
             return
+        if self.worker.isRunning():
+            logger.warning("Sweep start requested while worker is still running")
+            return
         self._sweep_control(start=True)
 
         for m in self.markers:
@@ -789,6 +818,10 @@ class NanoVNASaver(QWidget):
         self.tdr_result_label.setText("")
 
         logger.debug("Starting worker thread")
+        self._batch_watchdog_progress = -1.0
+        self._batch_watchdog_changed_at = monotonic()
+        if self._batch_active and not self._batch_watchdog.isActive():
+            self._batch_watchdog.start()
         self.worker.start()
         # TODO: Rewrite to make worker a qrunnable with worker signals
         # https://www.pythonguis.com/tutorials/multithreading-pyqt6-applications-qthreadpool/
@@ -838,6 +871,10 @@ class NanoVNASaver(QWidget):
                     self.delta_marker.updateLabels()
 
     def dataUpdated(self):
+        worker_progress = float(self.worker.percentage)
+        if worker_progress != self._batch_watchdog_progress:
+            self._batch_watchdog_progress = worker_progress
+            self._batch_watchdog_changed_at = monotonic()
     
         with self.dataLock:
             s11 = self.data.s11[:]
@@ -874,7 +911,7 @@ class NanoVNASaver(QWidget):
         self.calibrationCharts[1].setData(s21_cal)#S21_db_phase
         self.calibrationCharts[2].setData(s21_cal)#real_imag_shunt
 
-        self.sweep_control.progress_bar.setValue(int(self.worker.percentage))
+        self.sweep_control.progress_bar.setValue(int(worker_progress))
         self.windows["tdr"].updateTDR()
 
         if s11:
@@ -907,6 +944,8 @@ class NanoVNASaver(QWidget):
         self.communicate.data_available.emit()
 
     def sweepFinished(self):
+        if not self._batch_active and self._batch_watchdog.isActive():
+            self._batch_watchdog.stop()
         self._sweep_control(start=False)
 
         for marker in self.markers:
@@ -981,6 +1020,122 @@ class NanoVNASaver(QWidget):
     def showError(self, text):
         QtWidgets.QMessageBox.warning(self, "Error", text)
 
+    def reboot_vna_power(self):
+        if not self.vna or not self.vna.connected():
+            self.showError("NanoVNA is not connected.")
+            return
+
+        reply = QtWidgets.QMessageBox.question(
+            self,
+            "Reboot NanoVNA",
+            "Send reset command to the NanoVNA?\n\n"
+            "The USB connection will disconnect, then NanoVNASaver will "
+            "try to reconnect automatically.",
+            QtWidgets.QMessageBox.StandardButton.Yes
+            | QtWidgets.QMessageBox.StandardButton.No,
+            QtWidgets.QMessageBox.StandardButton.No,
+        )
+        if reply != QtWidgets.QMessageBox.StandardButton.Yes:
+            return
+
+        if self._batch_active:
+            self._batch_active = False
+            self._batch_watchdog.stop()
+            self.btn_batch_stop.setDisabled(True)
+            self.btn_batch_start.setDisabled(False)
+
+        if self.worker.isRunning():
+            self.worker.quit()
+            serial_port = getattr(self.vna, "serial", None)
+            with contextlib.suppress(Exception):
+                if hasattr(serial_port, "cancel_read"):
+                    serial_port.cancel_read()
+                if hasattr(serial_port, "cancel_write"):
+                    serial_port.cancel_write()
+            if not self.worker.wait(5000):
+                logger.warning("Worker did not stop before VNA reboot")
+                self.showError("Sweep is still running. Stop the sweep before rebooting.")
+                return
+            self._sweep_control(start=False)
+
+        try:
+            reconnect_port = self._send_vna_reset_and_close()
+        except Exception as exc:
+            logger.exception("Failed to reboot NanoVNA: %s", exc)
+            self.showError(f"Failed to send NanoVNA reset command: {exc}")
+            return
+
+        QtCore.QTimer.singleShot(
+            REBOOT_RECONNECT_INTERVAL_MS,
+            lambda: self._auto_reconnect_after_reboot(
+                reconnect_port, REBOOT_RECONNECT_ATTEMPTS
+            ),
+        )
+
+    def _send_vna_reset_and_close(self) -> str | None:
+        reconnect_port = getattr(getattr(self.vna, "serial", None), "port", None)
+        self.vna.power_reset()
+
+        serial_port = getattr(self.vna, "serial", None)
+        with contextlib.suppress(Exception):
+            if hasattr(serial_port, "cancel_read"):
+                serial_port.cancel_read()
+            if hasattr(serial_port, "cancel_write"):
+                serial_port.cancel_write()
+            serial_port.close()
+        self.serial_control.mark_disconnected()
+        return reconnect_port
+
+    def _auto_reconnect_after_reboot(
+        self,
+        reconnect_port: str | None,
+        attempts_left: int,
+        on_connected=None,
+        on_failed=None,
+    ) -> None:
+        if self.vna and self.vna.connected():
+            if on_connected:
+                on_connected()
+            return
+
+        try:
+            self.serial_control.rescanSerialPort()
+            selected = False
+            if reconnect_port:
+                selected = self.serial_control.select_port(reconnect_port)
+            if not selected and self.serial_control.inp_port.count() == 1:
+                self.serial_control.inp_port.setCurrentIndex(0)
+                selected = self.serial_control.inp_port.currentData() is not None
+
+            if selected:
+                self.serial_control.connect_device()
+                if self.vna and self.vna.connected():
+                    if on_connected:
+                        on_connected()
+                    return
+        except Exception as exc:
+            logger.debug("Auto reconnect after NanoVNA reboot failed: %s", exc)
+
+        attempts_left -= 1
+        if attempts_left <= 0:
+            if on_failed:
+                on_failed()
+            else:
+                self.showError(
+                    "NanoVNA reset command was sent, but automatic reconnect timed out."
+                )
+            return
+
+        QtCore.QTimer.singleShot(
+            REBOOT_RECONNECT_INTERVAL_MS,
+            lambda: self._auto_reconnect_after_reboot(
+                reconnect_port,
+                attempts_left,
+                on_connected=on_connected,
+                on_failed=on_failed,
+            ),
+        )
+
     def showSweepError(self):
         # self.showError(self.worker.error_message)
         # with contextlib.suppress(IOError):
@@ -996,11 +1151,10 @@ class NanoVNASaver(QWidget):
             self._batch_last_sweep_failed = True
             self._batch_last_error_message = msg
 
-            with contextlib.suppress(IOError, Exception):
-                self.vna.flushSerialBuffers()
-                self.vna.reconnect()
+            self._recover_vna_after_failed_batch_sweep()
 
             self.sweepFinished()
+            self._on_sweep_finished_for_batch()
             return
 
         # 通常 sweep は従来通り
@@ -1097,6 +1251,12 @@ class NanoVNASaver(QWidget):
         self._batch_cfg = cfg
         self._batch_index = 0
         self._batch_active = True
+        self._batch_last_sweep_failed = False
+        self._batch_last_error_message = ""
+        self._batch_last_connection_refresh_at = monotonic()
+        self._batch_needs_recovery_cooldown = False
+        self._batch_recovery_failures = 0
+        self._batch_reconnect_port = None
 
         self.btn_batch_start.setDisabled(True)
         self.btn_batch_stop.setDisabled(False)
@@ -1106,6 +1266,7 @@ class NanoVNASaver(QWidget):
 
     def batch_stop(self):
         self._batch_active = False
+        self._batch_watchdog.stop()
         self.btn_batch_stop.setDisabled(True)
         self.btn_batch_start.setDisabled(False)
         # stop current sweep if running
@@ -1118,12 +1279,66 @@ class NanoVNASaver(QWidget):
         if self._batch_index >= self._batch_cfg.count:
             # done
             self._batch_active = False
+            self._batch_watchdog.stop()
             self.btn_batch_stop.setDisabled(True)
             self.btn_batch_start.setDisabled(False)
             return
 
         self._batch_index += 1
         self.sweep_start()
+
+    def _batch_watchdog_tick(self):
+        if not self._batch_active or not self._batch_cfg:
+            self._batch_watchdog.stop()
+            return
+        if not self.worker.isRunning():
+            return
+
+        stalled_s = monotonic() - self._batch_watchdog_changed_at
+        if stalled_s < BATCH_SWEEP_STALL_TIMEOUT_S:
+            return
+
+        message = (
+            f"sweep stalled at {self.worker.percentage:.0f}% "
+            f"for {stalled_s:.0f}s"
+        )
+        logger.warning("Batch sweep %d %s", self._batch_index, message)
+        self._batch_last_sweep_failed = True
+        self._batch_last_error_message = message
+        self._abort_stalled_worker()
+        self._batch_needs_recovery_cooldown = True
+        self.sweepFinished()
+        self._on_sweep_finished_for_batch()
+
+    def _note_batch_worker_activity(self) -> None:
+        if self._batch_active:
+            self._batch_watchdog_changed_at = monotonic()
+
+    def _abort_stalled_worker(self) -> None:
+        self.worker.quit()
+
+        serial_port = getattr(getattr(self, "vna", None), "serial", None)
+        with contextlib.suppress(Exception):
+            if hasattr(serial_port, "cancel_read"):
+                serial_port.cancel_read()
+            if hasattr(serial_port, "cancel_write"):
+                serial_port.cancel_write()
+
+        if not self.worker.wait(5000):
+            logger.warning("Worker did not stop after quit; terminating thread")
+            with contextlib.suppress(Exception):
+                serial_port.close()
+            self.worker.terminate()
+            self.worker.wait(2000)
+
+        with contextlib.suppress(Exception):
+            self.vna.flushSerialBuffers()
+        with contextlib.suppress(Exception):
+            self.vna.reconnect()
+            self._batch_last_connection_refresh_at = monotonic()
+
+        self.worker = SweepWorker(self)
+        self._connect_worker_signals()
 
     # def _on_sweep_finished_for_batch(self):
         # # called on every sweep finish; only act if batch is active
@@ -1147,45 +1362,267 @@ class NanoVNASaver(QWidget):
         if not self._batch_active or not self._batch_cfg:
             return
 
-        if self._batch_last_sweep_failed:
-            logger.warning(
-                "Skipping save for failed sweep %d: %s",
-                self._batch_index,
-                self._batch_last_error_message,
+        try:
+            if self._batch_last_sweep_failed:
+                logger.warning(
+                    "Skipping save for failed sweep %d: %s",
+                    self._batch_index,
+                    self._batch_last_error_message,
+                )
+                self._batch_log_error(
+                    self._batch_index, self._batch_last_error_message
+                )
+                self._batch_last_sweep_failed = False
+                self._batch_last_error_message = ""
+            else:
+                try:
+                    self._batch_save_current_touchstone()
+                except Exception as exc:
+                    logger.exception("Failed saving sweep %d", self._batch_index)
+                    self._batch_log_error(
+                        self._batch_index, f"save failed: {exc}"
+                    )
+        finally:
+            if self._batch_active and self._batch_cfg:
+                rest_ms = int(self._batch_cfg.rest_s * 1000)
+                if self._batch_needs_recovery_cooldown:
+                    rest_ms = max(rest_ms, BATCH_ERROR_RECOVERY_COOLDOWN_MS)
+                    self._batch_needs_recovery_cooldown = False
+
+                if not self._vna_connected():
+                    self._reconnect_vna_for_batch(rest_ms)
+                    return
+
+                if self._batch_should_reboot_before_next_sweep():
+                    self._reboot_vna_for_batch(rest_ms)
+                    return
+
+                self._refresh_vna_connection_between_batch_sweeps()
+                if not self._vna_connected():
+                    self._reconnect_vna_for_batch(rest_ms)
+                    return
+                QtCore.QTimer.singleShot(rest_ms, self._batch_start_next)
+
+    def _batch_should_reboot_before_next_sweep(self) -> bool:
+        if not self._batch_active or not self._batch_cfg:
+            return False
+        if self._batch_index >= self._batch_cfg.count:
+            return False
+        return self._batch_index % self._batch_cfg.reboot_every == 0
+
+    def _vna_connected(self) -> bool:
+        try:
+            return bool(self.vna and self.vna.connected())
+        except Exception:
+            return False
+
+    def _close_vna_for_batch_reconnect(self) -> str | None:
+        serial_port = getattr(getattr(self, "vna", None), "serial", None)
+        reconnect_port = getattr(serial_port, "port", None)
+        with contextlib.suppress(Exception):
+            if hasattr(serial_port, "cancel_read"):
+                serial_port.cancel_read()
+            if hasattr(serial_port, "cancel_write"):
+                serial_port.cancel_write()
+            serial_port.close()
+        self.serial_control.mark_disconnected()
+        self._batch_reconnect_port = reconnect_port
+        return reconnect_port
+
+    def _reconnect_vna_for_batch(self, rest_ms: int) -> None:
+        if not self._batch_active:
+            return
+
+        reconnect_port = self._batch_reconnect_port
+        if not reconnect_port:
+            reconnect_port = getattr(
+                getattr(getattr(self, "vna", None), "serial", None),
+                "port",
+                None,
             )
 
-            # 失敗ログだけ残す
-            fail_log = os.path.join(
-                self._batch_cfg.out_dir,
-                f"{self._batch_cfg.base_name}_errors.csv"
+        logger.info("Waiting for NanoVNA reconnect during batch sweep")
+
+        def continue_batch() -> None:
+            if not self._batch_active:
+                return
+            self._batch_last_connection_refresh_at = monotonic()
+            self._batch_recovery_failures = 0
+            self._batch_reconnect_port = None
+            QtCore.QTimer.singleShot(rest_ms, self._batch_start_next)
+
+        def retry_later() -> None:
+            if not self._batch_active:
+                return
+            message = "automatic reconnect during batch sweep timed out; retrying"
+            logger.error(message)
+            self._batch_log_error(self._batch_index, message)
+            QtCore.QTimer.singleShot(
+                BATCH_ERROR_RECOVERY_COOLDOWN_MS,
+                lambda: self._reconnect_vna_for_batch(rest_ms),
             )
+
+        QtCore.QTimer.singleShot(
+            REBOOT_RECONNECT_INTERVAL_MS,
+            lambda: self._auto_reconnect_after_reboot(
+                reconnect_port,
+                REBOOT_RECONNECT_ATTEMPTS,
+                on_connected=continue_batch,
+                on_failed=retry_later,
+            ),
+        )
+
+    def _reboot_vna_for_batch(self, rest_ms: int) -> None:
+        if not self._batch_active or not self._batch_cfg:
+            return
+
+        logger.info(
+            "Rebooting NanoVNA after batch sweep %d", self._batch_index
+        )
+        try:
+            reconnect_port = self._send_vna_reset_and_close()
+        except Exception as exc:
+            logger.warning("Batch NanoVNA reboot failed: %s", exc)
+            self._batch_log_error(
+                self._batch_index,
+                f"reboot failed: {exc}",
+            )
+            self._close_vna_for_batch_reconnect()
+            self._record_vna_recovery_failure(exc)
+            if self._batch_active:
+                self._reconnect_vna_for_batch(rest_ms)
+            return
+
+        def continue_batch() -> None:
+            if not self._batch_active:
+                return
+            self._batch_last_connection_refresh_at = monotonic()
+            self._batch_recovery_failures = 0
+            QtCore.QTimer.singleShot(rest_ms, self._batch_start_next)
+
+        def stop_batch() -> None:
+            message = (
+                "automatic reconnect after scheduled NanoVNA reboot timed out; "
+                "retrying"
+            )
+            logger.error(message)
+            self._batch_log_error(self._batch_index, message)
+            QtCore.QTimer.singleShot(
+                BATCH_ERROR_RECOVERY_COOLDOWN_MS,
+                lambda: self._reconnect_vna_for_batch(rest_ms),
+            )
+
+        QtCore.QTimer.singleShot(
+            REBOOT_RECONNECT_INTERVAL_MS,
+            lambda: self._auto_reconnect_after_reboot(
+                reconnect_port,
+                REBOOT_RECONNECT_ATTEMPTS,
+                on_connected=continue_batch,
+                on_failed=stop_batch,
+            ),
+        )
+
+    def _recover_vna_after_failed_batch_sweep(self) -> None:
+        self._batch_needs_recovery_cooldown = True
+        bandwidth = getattr(self.vna, "bandwidth", None)
+
+        with contextlib.suppress(Exception):
+            serial_port = getattr(self.vna, "serial", None)
+            if hasattr(serial_port, "cancel_read"):
+                serial_port.cancel_read()
+            if hasattr(serial_port, "cancel_write"):
+                serial_port.cancel_write()
+
+        try:
+            self.vna.reconnect()
+            self.vna.resetSweep(int(self.sweep.start), int(self.sweep.end))
+            if bandwidth is not None and "Bandwidth" in self.vna.features:
+                self.vna.set_bandwidth(bandwidth)
+            self._batch_last_connection_refresh_at = monotonic()
+            self._batch_recovery_failures = 0
+        except Exception as exc:
+            logger.warning("VNA recovery after failed batch sweep failed: %s", exc)
+            self._batch_log_error(
+                self._batch_index,
+                f"recovery failed: {exc}",
+            )
+            self._close_vna_for_batch_reconnect()
+            self._record_vna_recovery_failure(exc)
+
+    def _refresh_vna_connection_between_batch_sweeps(self) -> None:
+        if not self._vna_connected():
+            return
+
+        elapsed_s = monotonic() - self._batch_last_connection_refresh_at
+        sweep_refresh_due = (
+            self._batch_index > 0
+            and self._batch_index % BATCH_CONNECTION_REFRESH_SWEEPS == 0
+        )
+        time_refresh_due = elapsed_s >= BATCH_CONNECTION_REFRESH_INTERVAL_S
+        if not sweep_refresh_due and not time_refresh_due:
+            return
+
+        logger.info(
+            "Refreshing VNA connection after batch sweep %d (elapsed %.0fs)",
+            self._batch_index,
+            elapsed_s,
+        )
+        try:
+            bandwidth = self.vna.bandwidth
+            self.vna.reconnect()
+            self.vna.resetSweep(int(self.sweep.start), int(self.sweep.end))
+            if "Bandwidth" in self.vna.features:
+                self.vna.set_bandwidth(bandwidth)
+            self._batch_last_connection_refresh_at = monotonic()
+            self._batch_recovery_failures = 0
+        except Exception as exc:
+            logger.warning("VNA connection refresh failed: %s", exc)
+            self._batch_log_error(
+                self._batch_index,
+                f"connection refresh failed: {exc}",
+            )
+            self._close_vna_for_batch_reconnect()
+            self._record_vna_recovery_failure(exc)
+
+    def _record_vna_recovery_failure(self, exc: Exception) -> None:
+        self._batch_recovery_failures += 1
+        if self._batch_recovery_failures < BATCH_MAX_RECOVERY_FAILURES:
+            return
+
+        message = (
+            "VNA communication is not recovering "
+            f"after {self._batch_recovery_failures} attempts: {exc}. "
+            "Keeping batch active and waiting for automatic reconnect."
+        )
+        logger.error(message)
+        self._batch_log_error(self._batch_index, message)
+
+    def _stop_batch_after_unrecoverable_vna_failure(self) -> None:
+        self._batch_active = False
+        self._batch_watchdog.stop()
+        self.btn_batch_stop.setDisabled(True)
+        self.btn_batch_start.setDisabled(False)
+        with contextlib.suppress(Exception):
+            self.worker.quit()
+        with contextlib.suppress(Exception):
+            self.vna.disconnect()
+
+    def _batch_log_error(self, index: int, message: str) -> None:
+        if not self._batch_cfg:
+            return
+
+        fail_log = os.path.join(
+            self._batch_cfg.out_dir,
+            f"{self._batch_cfg.base_name}_errors.csv"
+        )
+        try:
             new_file = not os.path.exists(fail_log)
             with open(fail_log, "a", encoding="utf-8") as f:
                 if new_file:
                     f.write("index,error\n")
-                f.write(f'{self._batch_index},"{self._batch_last_error_message}"\n')
-
-            self._batch_last_sweep_failed = False
-            self._batch_last_error_message = ""
-        else:
-            try:
-                self._batch_save_current_touchstone()
-            except Exception as exc:
-                logger.exception("Failed saving sweep %d", self._batch_index)
-
-                fail_log = os.path.join(
-                    self._batch_cfg.out_dir,
-                    f"{self._batch_cfg.base_name}_errors.csv"
-                )
-                new_file = not os.path.exists(fail_log)
-                with open(fail_log, "a", encoding="utf-8") as f:
-                    if new_file:
-                        f.write("index,error\n")
-                    f.write(f'{self._batch_index},"save failed: {exc}"\n')
-
-        # schedule next sweep after rest time
-        rest_ms = int(self._batch_cfg.rest_s * 1000)
-        QtCore.QTimer.singleShot(rest_ms, self._batch_start_next)
+                f.write(f'{index},"{message}"\n')
+        except Exception:
+            logger.exception("Failed writing batch error log")
 
     def _batch_save_current_touchstone(self):
         assert self._batch_cfg is not None
@@ -1254,6 +1691,7 @@ class NanoVNASaver(QWidget):
                         raw_data["fault"],
                     )
             except Exception as exc:
-                self.showError(
-                    f"Temperature logging failed for sweep {idx}: {exc}"
+                logger.warning(
+                    "Temperature logging failed for sweep %d: %s", idx, exc
                 )
+                self._batch_log_error(idx, f"temperature failed: {exc}")
