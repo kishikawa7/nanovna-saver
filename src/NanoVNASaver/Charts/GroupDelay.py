@@ -179,8 +179,6 @@ class GroupDelayChart(FrequencyChart):
         for i, d in enumerate(data):
             x = self.getXPosition(d)
             y = self.getYPositionFromDelay(delay[i])
-            if self.isPlotable(x, y):
-                qp.drawPoint(int(x), int(y))
             if self.flag.draw_lines and i > 0:
                 prevx = self.getXPosition(data[i - 1])
                 prevy = self.getYPositionFromDelay(delay[i - 1])
@@ -195,6 +193,8 @@ class GroupDelayChart(FrequencyChart):
                     new_x, new_y = self.getPlotable(prevx, prevy, x, y)
                     qp.drawLine(prevx, prevy, new_x, new_y)
                 qp.setPen(pen)
+            if self.isPlotable(x, y):
+                qp.drawPoint(int(x), int(y))
 
     def getYPosition(self, d: Datapoint) -> int:
         # TODO: Find a faster way than these expensive "d in data" lookups

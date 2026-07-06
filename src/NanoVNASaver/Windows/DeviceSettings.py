@@ -149,7 +149,12 @@ class DeviceSettingsWindow(QtWidgets.QWidget):
             self.label["status"].setText("Not connected.")
             self.label["firmware"].setText("Not connected.")
             self.label["hardware"].setText("Not connected.")
-            self.label["calibration"].setText("Not connected.")
+            # self.label["calibration"].setText("Not connected.")
+            try:
+                self.label["calibration"].setText(self.app.vna.getCalibration())
+            except Exception as e:
+                logger.warning("DeviceSettings.updateFields: calibration read failed: %s", e)
+                self.label["calibration"].setText("N/A")
             self.label["SN"].setText("Not connected.")
             self.featureList.clear()
             self.btnCaptureScreenshot.setDisabled(True)

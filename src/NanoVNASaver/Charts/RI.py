@@ -197,6 +197,12 @@ class RealImaginaryChart(FrequencyChart):
                 # Imag part second
                 line_pen.setColor(Chart.color.reference_secondary)
                 self._draw_line(qp, line_pen, (x, y_im), (prev_x, prev_y_im))
+            qp.setPen(primary_pen)
+            if self.isPlotable(x, y_re):
+                qp.drawPoint(x, y_re)
+            qp.setPen(secondary_pen)
+            if self.isPlotable(x, y_im):
+                qp.drawPoint(x, y_im)
 
     def _draw_data(self, qp, line_pen, primary_pen, secondary_pen) -> None:
         for i, data in enumerate(self.data):
@@ -231,6 +237,12 @@ class RealImaginaryChart(FrequencyChart):
                     ChartPosition(x, y_im),
                     ChartPosition(prev_x, prev_y_im),
                 )
+            qp.setPen(primary_pen)
+            if self.isPlotable(x, y_re):
+                qp.drawPoint(x, y_re)
+            qp.setPen(secondary_pen)
+            if self.isPlotable(x, y_im):
+                qp.drawPoint(x, y_im)
 
     def _draw_line(
         self, qp, line_pen, p: ChartPosition, prev_p: ChartPosition

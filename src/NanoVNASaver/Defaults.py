@@ -53,7 +53,7 @@ class ChartsSelectedConfig:
 @dataclass
 class ChartConfig:
     point_size: int = 2
-    show_lines: bool = False
+    show_lines: bool = True
     line_thickness: int = 1
     marker_count: int = 3
     marker_label: bool = False

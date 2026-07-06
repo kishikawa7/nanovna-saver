@@ -209,6 +209,12 @@ class PermeabilityChart(FrequencyChart):
                 elif self.isPlotable(prev_x, prev_y_im):
                     new_x, new_y = self.getPlotable(prev_x, prev_y_im, x, y_im)
                     qp.drawLine(prev_x, prev_y_im, new_x, new_y)
+            qp.setPen(primary_pen)
+            if self.isPlotable(x, y_re):
+                qp.drawPoint(x, y_re)
+            qp.setPen(secondary_pen)
+            if self.isPlotable(x, y_im):
+                qp.drawPoint(x, y_im)
 
         primary_pen.setColor(Chart.color.reference)
         line_pen.setColor(Chart.color.reference)
@@ -279,6 +285,12 @@ class PermeabilityChart(FrequencyChart):
                 elif self.isPlotable(prev_x, prev_y_im):
                     new_x, new_y = self.getPlotable(prev_x, prev_y_im, x, y_im)
                     qp.drawLine(prev_x, prev_y_im, new_x, new_y)
+            qp.setPen(primary_pen)
+            if self.isPlotable(x, y_re):
+                qp.drawPoint(x, y_re)
+            qp.setPen(secondary_pen)
+            if self.isPlotable(x, y_im):
+                qp.drawPoint(x, y_im)
 
         # Now draw the markers
         for m in self.markers:

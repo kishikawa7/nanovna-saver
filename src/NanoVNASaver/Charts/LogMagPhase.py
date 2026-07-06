@@ -215,6 +215,12 @@ class LogMagPhaseChart(FrequencyChart):
                 # Imag part second
                 line_pen.setColor(Chart.color.reference_secondary)
                 self._draw_line(qp, line_pen, (x, y_phase), (prev_x, prev_y_phase))
+            qp.setPen(primary_pen)
+            if self.isPlotable(x, y_db):
+                qp.drawPoint(x, y_db)
+            qp.setPen(secondary_pen)
+            if self.isPlotable(x, y_phase):
+                qp.drawPoint(x, y_phase)
 
     def _draw_data(self, qp, line_pen, primary_pen, secondary_pen) -> None:
         for i, data in enumerate(self.data):
@@ -249,6 +255,12 @@ class LogMagPhaseChart(FrequencyChart):
                     ChartPosition(x, y_phase),
                     ChartPosition(prev_x, prev_y_phase),
                 )
+            qp.setPen(primary_pen)
+            if self.isPlotable(x, y_db):
+                qp.drawPoint(x, y_db)
+            qp.setPen(secondary_pen)
+            if self.isPlotable(x, y_phase):
+                qp.drawPoint(x, y_phase)
 
     def _draw_line(
         self, qp, line_pen, p: ChartPosition, prev_p: ChartPosition

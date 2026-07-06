@@ -37,10 +37,23 @@ HARD_COMM_FAILURE_TEXT = (
     "Could not configure port",
     "write failed",
 )
+SCAN_MASK_DISABLED_FOR_SESSION = False
 
 
 def _is_hard_comm_failure(exc: Exception) -> bool:
     return any(text in str(exc) for text in HARD_COMM_FAILURE_TEXT)
+
+
+def _disable_scan_mask_for_session(reason: Exception) -> None:
+    global SCAN_MASK_DISABLED_FOR_SESSION  # pylint: disable=global-statement
+    if SCAN_MASK_DISABLED_FOR_SESSION:
+        return
+    SCAN_MASK_DISABLED_FOR_SESSION = True
+    logger.warning(
+        "Disabling scan mask command for this session after communication "
+        "failure: %s",
+        reason,
+    )
 
 
 class NanoVNA(VNA):
@@ -156,9 +169,17 @@ class NanoVNA(VNA):
     def init_features(self) -> None:
         super().init_features()
         if self.version >= Version.parse("0.7.1"):
-            logger.debug("Using scan mask command.")
-            self.features.add("Scan mask command")
-            self.sweep_method = "scan_mask"
+            if SCAN_MASK_DISABLED_FOR_SESSION:
+                logger.info(
+                    "Using scan command because scan mask was disabled "
+                    "after a communication failure."
+                )
+                self.features.add("Scan command")
+                self.sweep_method = "scan"
+            else:
+                logger.debug("Using scan mask command.")
+                self.features.add("Scan mask command")
+                self.sweep_method = "scan_mask"
         elif self.version >= Version.parse("0.2.0"):
             logger.debug("Using new scan command.")
             self.features.add("Scan command")
@@ -215,9 +236,17 @@ class NanoVNA(VNA):
             )
             self._recover_after_comm_failure()
             if _is_hard_comm_failure(e):
+                _disable_scan_mask_for_session(e)
+                self.features.discard("Scan mask command")
+                self.features.add("Scan command")
+                self.sweep_method = "scan"
                 self._sweepdata = []
                 raise
             if "command timeout" in str(e):
+                _disable_scan_mask_for_session(e)
+                self.features.discard("Scan mask command")
+                self.features.add("Scan command")
+                self.sweep_method = "scan"
                 self._sweepdata = []
                 raise
 

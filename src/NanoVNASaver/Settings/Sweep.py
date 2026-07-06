@@ -18,7 +18,7 @@
 #  along with this program.  If not, see <https://www.gnu.org/licenses/>.
 import logging
 from enum import Enum
-from math import exp, log
+from math import exp, log, log10
 from threading import Lock
 from typing import Iterator, NamedTuple, Optional
 
@@ -37,7 +37,10 @@ class Properties(NamedTuple):
     mode: "SweepMode" = SweepMode.AVERAGE
     averages: tuple[int, int] = (1, 0)
     # logarithmic: bool = False
-    logarithmic: bool = True
+    logarithmic: bool = False
+    logarithmic_measurement: bool = True
+    logarithmic_points_per_decade: int = 20
+    logarithmic_points_per_scan: int = 1
 
 
 class Sweep:
@@ -159,6 +162,24 @@ class Sweep:
         with self._lock:
             self._properties = self.properties._replace(logarithmic=logarithmic)
 
+    def set_logarithmic_measurement(self, logarithmic: bool) -> None:
+        with self._lock:
+            self._properties = self.properties._replace(
+                logarithmic_measurement=logarithmic
+            )
+
+    def set_logarithmic_points_per_decade(self, points: int) -> None:
+        with self._lock:
+            self._properties = self.properties._replace(
+                logarithmic_points_per_decade=max(1, points)
+            )
+
+    def set_logarithmic_points_per_scan(self, points: int) -> None:
+        with self._lock:
+            self._properties = self.properties._replace(
+                logarithmic_points_per_scan=max(1, points)
+            )
+
     def check(self):
         if (
             self.segments < 1
@@ -192,3 +213,19 @@ class Sweep:
             for _ in range(self.points):
                 yield round(freq)
                 freq += step
+
+    def get_logarithmic_measurement_frequencies(self) -> Iterator[int]:
+        decades = log10(self.end / self.start)
+        intervals = max(
+            1,
+            round(decades * self.properties.logarithmic_points_per_decade),
+        )
+        total_points = intervals + 1
+        if total_points <= 1:
+            yield self.start
+            return
+        ratio = self.end / self.start
+        for i in range(total_points):
+            yield round(
+                self.start * exp(log(ratio) * i / (total_points - 1))
+            )

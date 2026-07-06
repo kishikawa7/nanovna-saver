@@ -93,7 +93,7 @@ import os
 from dataclasses import dataclass
 ####
 
-
+from pathlib import Path
 from .temperature_logging import TemperatureLoggingManager
 
 logger = logging.getLogger(__name__)
@@ -107,6 +107,14 @@ BATCH_CONNECTION_REFRESH_SWEEPS = 100
 BATCH_CONNECTION_REFRESH_INTERVAL_S = 60 * 60
 BATCH_ERROR_RECOVERY_COOLDOWN_MS = 15 * 1000
 BATCH_MAX_RECOVERY_FAILURES = 2
+BATCH_FATAL_COMMUNICATION_ERRORS = (
+    "command timeout",
+    "write failed",
+    "Write timeout",
+    "readline failed",
+    "serial is not open",
+    "device disconnected",
+)
 REBOOT_RECONNECT_INTERVAL_MS = 1000
 REBOOT_RECONNECT_ATTEMPTS = 20
 
@@ -161,7 +169,8 @@ def make_full_thru_network(ntwk):
 
 
 # calpath = '/home/keisuke/Documents/Spara/caldata/nanoVNAH4/20260325_nanoVNAH4_nocal_IF10Hz/'
-calpath = '/home/keisuke/Documents/Spara/caldata/nanoVNAH4/20260424_nanoVNAH4_DCcut/'
+# calpath = '/home/keisuke/Documents/Spara/caldata/nanoVNAH4/20260424_nanoVNAH4_DCcut/'
+calpath = '/home/keisuke/Documents/Spara/caldata/nanoVNAH4/20260615_nano_VNAH4_DCblock/'
 datalist = ['short','open','load','thru']
 caldata = {}
 for k in datalist:
@@ -173,6 +182,22 @@ media = DefinedGammaZ0(frequency=freq, z0=50, gamma=1j*beta)
 
 ideals = [media.short(nports=2), media.open(nports=2), media.match(nports=2), media.thru()]
 
+
+kVNApath = '/home/keisuke/Documents/Spara/caldata/20260407_30k-9G_IF100Hz_-10dBm_801pt_ave10_150mm/'
+ansdata = {}
+for i in ['short_P1', 'open_P1', 'load_P1', 'short_P2', 'open_P2', 'load_P2', 'thru']:
+    ansdata[i] = rf.Network(f'{kVNApath}S_{i}.s2p')
+    ansdata[f'fix{i}'] = ansdata[i].interpolate(freq, kind='linear', fill_value='extrapolate')
+
+
+ans_ideals = [
+    rf.two_port_reflect(ansdata['fixshort_P1'].s11, ansdata['fixshort_P2'].s22),
+    rf.two_port_reflect(ansdata['fixopen_P1'].s11, ansdata['fixopen_P2'].s22),
+    rf.two_port_reflect(ansdata['fixload_P1'].s11, ansdata['fixload_P2'].s22),
+    ansdata['fixthru'],
+]
+
+
 measured_thru  = caldata['thru']['ntwk']
 short_meas_2p = two_port_reflect(caldata['short']['ntwk'].s11, caldata['short']['ntwk'].s11)
 open_meas_2p  = two_port_reflect(caldata['open']['ntwk'].s11,  caldata['open']['ntwk'].s11)
@@ -180,11 +205,72 @@ load_meas_2p  = two_port_reflect(caldata['load']['ntwk'].s11,  caldata['load']['
 measured = [short_meas_2p, open_meas_2p,load_meas_2p,measured_thru]# Idealsと同じ順番でリストにする
 
 cal = SOLT(
-    ideals=ideals,
+    ideals=ans_ideals,
     measured=measured,
     n_ports=2,  # 2ポート校正であることを明示
     # isolation=data['iso']['ntwk']
         )
+
+_cal_cache_key = ()
+_cal_cache = cal
+
+
+def _frequency_key(frequency) -> tuple[int, ...]:
+    return tuple(int(round(f)) for f in frequency.f)
+
+
+def _network_at_frequency(ntwk, frequency):
+    return ntwk.interpolate(frequency, kind="linear", fill_value="extrapolate")
+
+
+def _calibration_at_frequency(frequency):
+    global _cal_cache_key, _cal_cache
+
+    key = _frequency_key(frequency)
+    if key == _cal_cache_key:
+        return _cal_cache
+
+    fixed_ans = {
+        name: _network_at_frequency(ansdata[name], frequency)
+        for name in (
+            "short_P1",
+            "open_P1",
+            "load_P1",
+            "short_P2",
+            "open_P2",
+            "load_P2",
+            "thru",
+        )
+    }
+    target_ideals = [
+        two_port_reflect(fixed_ans["short_P1"].s11, fixed_ans["short_P2"].s22),
+        two_port_reflect(fixed_ans["open_P1"].s11, fixed_ans["open_P2"].s22),
+        two_port_reflect(fixed_ans["load_P1"].s11, fixed_ans["load_P2"].s22),
+        fixed_ans["thru"],
+    ]
+
+    fixed_meas = {
+        name: _network_at_frequency(caldata[name]["ntwk"], frequency)
+        for name in datalist
+    }
+    target_measured = [
+        two_port_reflect(fixed_meas["short"].s11, fixed_meas["short"].s11),
+        two_port_reflect(fixed_meas["open"].s11, fixed_meas["open"].s11),
+        two_port_reflect(fixed_meas["load"].s11, fixed_meas["load"].s11),
+        fixed_meas["thru"],
+    ]
+
+    _cal_cache_key = key
+    _cal_cache = SOLT(
+        ideals=target_ideals,
+        measured=target_measured,
+        n_ports=2,
+    )
+    return _cal_cache
+
+
+def apply_external_calibration(ntwk):
+    return _calibration_at_frequency(ntwk.frequency).apply_cal(ntwk)
 
 
 
@@ -234,7 +320,7 @@ class BatchSweepDialog(QtWidgets.QDialog):
         # Count
         self.count_spin = QtWidgets.QSpinBox()
         self.count_spin.setRange(1, 10_000_000)
-        self.count_spin.setValue(30)
+        self.count_spin.setValue(20)
         layout.addRow("Number of sweeps:", self.count_spin)
 
         # Reboot interval
@@ -350,6 +436,8 @@ class NanoVNASaver(QWidget):
         self.dataLock = threading.Lock()
         self.data: Touchstone = Touchstone()
         self.ref_data: Touchstone = Touchstone()
+        self.calibrated_s11 = []
+        self.calibrated_s21 = []
 
         # Batch sweep state
         self._batch_active = False
@@ -362,7 +450,6 @@ class NanoVNASaver(QWidget):
         self._batch_recovery_failures = 0
         self._batch_watchdog_progress = -1.0
         self._batch_watchdog_changed_at = monotonic()
-        self._batch_reconnect_port: str | None = None
         self._batch_watchdog = QtCore.QTimer(self)
         self._batch_watchdog.setInterval(BATCH_WATCHDOG_INTERVAL_MS)
         self._batch_watchdog.timeout.connect(self._batch_watchdog_tick)
@@ -557,6 +644,8 @@ class NanoVNASaver(QWidget):
         for c in self.subscribing_charts:
             c.setMarkers(self.markers)
             c.setBands(self.bands)
+            c.setDrawLines(get_app_config().chart.show_lines)
+        self._set_chart_frequency_range()
 
         self.marker_data_layout = QtWidgets.QVBoxLayout()
         self.marker_data_layout.setContentsMargins(0, 0, 0, 0)
@@ -738,6 +827,7 @@ class NanoVNASaver(QWidget):
 
     def _connect_worker_signals(self) -> None:
         self.worker.signals.updated.connect(self.dataUpdated)
+        self.worker.signals.progress.connect(self.sweepProgressUpdated)
         self.worker.signals.finished.connect(self.sweepFinished)
         self.worker.signals.finished.connect(self._on_sweep_finished_for_batch)
         self.worker.signals.sweep_error.connect(self.showSweepError)
@@ -844,7 +934,9 @@ class NanoVNASaver(QWidget):
         with self.dataLock:
             marker.findLocation(self.data.s11)
             marker.resetLabels()
-            marker.updateLabels(self.data.s11, self.data.s21)
+            marker.updateLabels(
+                self.data.s11, self.data.s21, self.calibrated_s21
+            )
             for c in self.subscribing_charts:
                 c.update()
         if not self.delta_marker_layout.isHidden():
@@ -882,17 +974,21 @@ class NanoVNASaver(QWidget):
             ntwk = self.data.to_skrf_network()
             ntwk = make_full_thru_network(ntwk)
             ntwk = average_duplicate_freq(ntwk)
-            data_cal = cal.apply_cal(ntwk)
+            data_cal = apply_external_calibration(ntwk)
             tscal = Touchstone()   
             tscal.from_skrf_network(data_cal)
             s11_cal = tscal.s11[:]
             s21_cal = tscal.s21[:]
+            self.calibrated_s11 = s11_cal
+            self.calibrated_s21 = s21_cal
             # print(ntwk.s[:,1,0],s21_cal[0])
             
 
+        self._set_chart_frequency_range()
+
         for m in self.markers:
             m.resetLabels()
-            m.updateLabels(s11, s21)
+            m.updateLabels(s11, s21, s21_cal)
 
         for c in self.s11charts:
             c.setData(s11)
@@ -943,6 +1039,27 @@ class NanoVNASaver(QWidget):
         self.updateTitle()
         self.communicate.data_available.emit()
 
+    def _set_chart_frequency_range(self):
+        for chart in getattr(self, "subscribing_charts", []):
+            if hasattr(chart, "setFrequencyRange"):
+                chart.setFrequencyRange(self.sweep.start, self.sweep.end)
+            if (
+                self.sweep.properties.logarithmic_measurement
+                and hasattr(chart, "setLogarithmicX")
+            ):
+                chart.setLogarithmicX(True)
+                if hasattr(chart, "action_set_logarithmic_x"):
+                    chart.action_set_logarithmic_x.setChecked(True)
+                if hasattr(chart, "action_set_linear_x"):
+                    chart.action_set_linear_x.setChecked(False)
+
+    def sweepProgressUpdated(self):
+        worker_progress = float(self.worker.percentage)
+        if worker_progress != self._batch_watchdog_progress:
+            self._batch_watchdog_progress = worker_progress
+            self._batch_watchdog_changed_at = monotonic()
+        self.sweep_control.progress_bar.setValue(int(worker_progress))
+
     def sweepFinished(self):
         if not self._batch_active and self._batch_watchdog.isActive():
             self._batch_watchdog.stop()
@@ -959,7 +1076,7 @@ class NanoVNASaver(QWidget):
                 ntwk = self.data.to_skrf_network()
                 ntwk = make_full_thru_network(ntwk)
                 ntwk = average_duplicate_freq(ntwk)
-                data_cal = cal.apply_cal(ntwk)
+                data_cal = apply_external_calibration(ntwk)
                 tscal = Touchstone()   
                 tscal.from_skrf_network(data_cal)
                 s11_cal = tscal.s11[:]
@@ -1054,7 +1171,9 @@ class NanoVNASaver(QWidget):
                     serial_port.cancel_write()
             if not self.worker.wait(5000):
                 logger.warning("Worker did not stop before VNA reboot")
-                self.showError("Sweep is still running. Stop the sweep before rebooting.")
+                self.showError(
+                    "Sweep is still running. Stop the sweep before rebooting."
+                )
                 return
             self._sweep_control(start=False)
 
@@ -1122,7 +1241,8 @@ class NanoVNASaver(QWidget):
                 on_failed()
             else:
                 self.showError(
-                    "NanoVNA reset command was sent, but automatic reconnect timed out."
+                    "NanoVNA reset command was sent, but automatic reconnect "
+                    "timed out."
                 )
             return
 
@@ -1151,6 +1271,18 @@ class NanoVNASaver(QWidget):
             self._batch_last_sweep_failed = True
             self._batch_last_error_message = msg
 
+            if self._is_fatal_batch_communication_error(msg):
+                message = (
+                    "Fatal VNA communication error during batch sweep "
+                    f"{self._batch_index}: {msg}. "
+                    "Stopping batch; power-cycle the VNA."
+                )
+                logger.error(message)
+                self._batch_log_error(self._batch_index, message)
+                self._stop_batch_after_unrecoverable_vna_failure()
+                self.sweepFinished()
+                return
+
             self._recover_vna_after_failed_batch_sweep()
 
             self.sweepFinished()
@@ -1163,6 +1295,13 @@ class NanoVNASaver(QWidget):
             self.vna.flushSerialBuffers()
             self.vna.reconnect()
         self.sweepFinished()
+
+    @staticmethod
+    def _is_fatal_batch_communication_error(message: str) -> bool:
+        return any(
+            text in message
+            for text in BATCH_FATAL_COMMUNICATION_ERRORS
+        )
 
     def popoutChart(self, chart: Chart):
         logger.debug("Requested popout for chart: %s", chart.name)
@@ -1256,7 +1395,6 @@ class NanoVNASaver(QWidget):
         self._batch_last_connection_refresh_at = monotonic()
         self._batch_needs_recovery_cooldown = False
         self._batch_recovery_failures = 0
-        self._batch_reconnect_port = None
 
         self.btn_batch_start.setDisabled(True)
         self.btn_batch_stop.setDisabled(False)
@@ -1384,23 +1522,17 @@ class NanoVNASaver(QWidget):
                     )
         finally:
             if self._batch_active and self._batch_cfg:
+                self._refresh_vna_connection_between_batch_sweeps()
+            if self._batch_active and self._batch_cfg:
                 rest_ms = int(self._batch_cfg.rest_s * 1000)
                 if self._batch_needs_recovery_cooldown:
                     rest_ms = max(rest_ms, BATCH_ERROR_RECOVERY_COOLDOWN_MS)
                     self._batch_needs_recovery_cooldown = False
 
-                if not self._vna_connected():
-                    self._reconnect_vna_for_batch(rest_ms)
-                    return
-
                 if self._batch_should_reboot_before_next_sweep():
                     self._reboot_vna_for_batch(rest_ms)
                     return
 
-                self._refresh_vna_connection_between_batch_sweeps()
-                if not self._vna_connected():
-                    self._reconnect_vna_for_batch(rest_ms)
-                    return
                 QtCore.QTimer.singleShot(rest_ms, self._batch_start_next)
 
     def _batch_should_reboot_before_next_sweep(self) -> bool:
@@ -1409,68 +1541,6 @@ class NanoVNASaver(QWidget):
         if self._batch_index >= self._batch_cfg.count:
             return False
         return self._batch_index % self._batch_cfg.reboot_every == 0
-
-    def _vna_connected(self) -> bool:
-        try:
-            return bool(self.vna and self.vna.connected())
-        except Exception:
-            return False
-
-    def _close_vna_for_batch_reconnect(self) -> str | None:
-        serial_port = getattr(getattr(self, "vna", None), "serial", None)
-        reconnect_port = getattr(serial_port, "port", None)
-        with contextlib.suppress(Exception):
-            if hasattr(serial_port, "cancel_read"):
-                serial_port.cancel_read()
-            if hasattr(serial_port, "cancel_write"):
-                serial_port.cancel_write()
-            serial_port.close()
-        self.serial_control.mark_disconnected()
-        self._batch_reconnect_port = reconnect_port
-        return reconnect_port
-
-    def _reconnect_vna_for_batch(self, rest_ms: int) -> None:
-        if not self._batch_active:
-            return
-
-        reconnect_port = self._batch_reconnect_port
-        if not reconnect_port:
-            reconnect_port = getattr(
-                getattr(getattr(self, "vna", None), "serial", None),
-                "port",
-                None,
-            )
-
-        logger.info("Waiting for NanoVNA reconnect during batch sweep")
-
-        def continue_batch() -> None:
-            if not self._batch_active:
-                return
-            self._batch_last_connection_refresh_at = monotonic()
-            self._batch_recovery_failures = 0
-            self._batch_reconnect_port = None
-            QtCore.QTimer.singleShot(rest_ms, self._batch_start_next)
-
-        def retry_later() -> None:
-            if not self._batch_active:
-                return
-            message = "automatic reconnect during batch sweep timed out; retrying"
-            logger.error(message)
-            self._batch_log_error(self._batch_index, message)
-            QtCore.QTimer.singleShot(
-                BATCH_ERROR_RECOVERY_COOLDOWN_MS,
-                lambda: self._reconnect_vna_for_batch(rest_ms),
-            )
-
-        QtCore.QTimer.singleShot(
-            REBOOT_RECONNECT_INTERVAL_MS,
-            lambda: self._auto_reconnect_after_reboot(
-                reconnect_port,
-                REBOOT_RECONNECT_ATTEMPTS,
-                on_connected=continue_batch,
-                on_failed=retry_later,
-            ),
-        )
 
     def _reboot_vna_for_batch(self, rest_ms: int) -> None:
         if not self._batch_active or not self._batch_cfg:
@@ -1482,15 +1552,10 @@ class NanoVNASaver(QWidget):
         try:
             reconnect_port = self._send_vna_reset_and_close()
         except Exception as exc:
-            logger.warning("Batch NanoVNA reboot failed: %s", exc)
-            self._batch_log_error(
-                self._batch_index,
-                f"reboot failed: {exc}",
-            )
-            self._close_vna_for_batch_reconnect()
+            message = f"scheduled NanoVNA reboot failed: {exc}"
+            logger.warning(message)
+            self._batch_log_error(self._batch_index, message)
             self._record_vna_recovery_failure(exc)
-            if self._batch_active:
-                self._reconnect_vna_for_batch(rest_ms)
             return
 
         def continue_batch() -> None:
@@ -1503,14 +1568,11 @@ class NanoVNASaver(QWidget):
         def stop_batch() -> None:
             message = (
                 "automatic reconnect after scheduled NanoVNA reboot timed out; "
-                "retrying"
+                "stopping batch"
             )
             logger.error(message)
             self._batch_log_error(self._batch_index, message)
-            QtCore.QTimer.singleShot(
-                BATCH_ERROR_RECOVERY_COOLDOWN_MS,
-                lambda: self._reconnect_vna_for_batch(rest_ms),
-            )
+            self._stop_batch_after_unrecoverable_vna_failure()
 
         QtCore.QTimer.singleShot(
             REBOOT_RECONNECT_INTERVAL_MS,
@@ -1546,11 +1608,10 @@ class NanoVNASaver(QWidget):
                 self._batch_index,
                 f"recovery failed: {exc}",
             )
-            self._close_vna_for_batch_reconnect()
             self._record_vna_recovery_failure(exc)
 
     def _refresh_vna_connection_between_batch_sweeps(self) -> None:
-        if not self._vna_connected():
+        if not self.vna.connected():
             return
 
         elapsed_s = monotonic() - self._batch_last_connection_refresh_at
@@ -1581,7 +1642,6 @@ class NanoVNASaver(QWidget):
                 self._batch_index,
                 f"connection refresh failed: {exc}",
             )
-            self._close_vna_for_batch_reconnect()
             self._record_vna_recovery_failure(exc)
 
     def _record_vna_recovery_failure(self, exc: Exception) -> None:
@@ -1592,10 +1652,11 @@ class NanoVNASaver(QWidget):
         message = (
             "VNA communication is not recovering "
             f"after {self._batch_recovery_failures} attempts: {exc}. "
-            "Keeping batch active and waiting for automatic reconnect."
+            "Stopping batch; power-cycle the VNA."
         )
         logger.error(message)
         self._batch_log_error(self._batch_index, message)
+        self._stop_batch_after_unrecoverable_vna_failure()
 
     def _stop_batch_after_unrecoverable_vna_failure(self) -> None:
         self._batch_active = False

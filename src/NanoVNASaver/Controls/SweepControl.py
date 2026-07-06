@@ -229,6 +229,14 @@ class SweepControl(Control):
         fspan = self.get_span()
         if fspan < 0:
             return
+        if self.app.sweep.properties.logarithmic_measurement:
+            self.update_sweep()
+            points = sum(
+                1
+                for _ in self.app.sweep.get_logarithmic_measurement_frequencies()
+            )
+            self.label_step.setText(f"log spaced ({points} pts)")
+            return
         segments = self.get_segments()
         if segments > 0:
             fstep = fspan / (segments * self.app.vna.datapoints - 1)
@@ -242,6 +250,8 @@ class SweepControl(Control):
             segments=self.get_segments(),
             points=self.app.vna.datapoints,
         )
+        if hasattr(self.app, "_set_chart_frequency_range"):
+            self.app._set_chart_frequency_range()
 
     def update_sweep_btn(self, enabled: bool) -> None:
         self.btn_start.setEnabled(enabled)

@@ -202,6 +202,12 @@ class FrequencyChart(Chart):
         self.setPalette(pal)
         self.setAutoFillBackground(True)
 
+    def setFrequencyRange(self, start: int, stop: int) -> None:
+        self.minFrequency = max(1, int(start))
+        self.maxFrequency = max(self.minFrequency, int(stop))
+        self.fixedSpan = True
+        self.action_fixed_span.setChecked(True)
+
     def _set_start_stop(self):
         if self.fixedSpan:
             self.fstart = self.minFrequency
@@ -618,8 +624,14 @@ class FrequencyChart(Chart):
     def drawFrequencyTicks(self, qp):
         fspan = self.fstop - self.fstart
         qp.setPen(Chart.color.text)
+        if self.logarithmicX and self.fstart > 0 and self.fstop > self.fstart:
+            self._draw_log_frequency_ticks(qp)
+            return
+
         # Number of ticks does not include the origin
         ticks = math.floor(self.dim.width / 100)
+        if ticks <= 0:
+            return
 
         # try to adapt format to span
         if self.fstart == 0 or int(fspan / ticks / self.fstart * 10000) > 2:
@@ -651,6 +663,26 @@ class FrequencyChart(Chart):
                 x - 20,
                 self.topMargin + self.dim.height + 15,
                 my_format_frequency(freq),
+            )
+
+    def _draw_log_frequency_ticks(self, qp):
+        min_decade = math.ceil(math.log10(self.fstart))
+        max_decade = math.floor(math.log10(self.fstop))
+        if min_decade > max_decade:
+            return
+
+        for decade in range(min_decade, max_decade + 1):
+            freq = 10**decade
+            x = self.getXPosition(Datapoint(freq, 0, 0))
+            qp.setPen(QtGui.QPen(Chart.color.foreground))
+            qp.drawLine(
+                x, self.topMargin, x, self.topMargin + self.dim.height + 5
+            )
+            qp.setPen(Chart.color.text)
+            qp.drawText(
+                x - 20,
+                self.topMargin + self.dim.height + 15,
+                format_frequency_chart(freq),
             )
 
     def drawBands(self, qp, fstart, fstop):
@@ -695,8 +727,6 @@ class FrequencyChart(Chart):
             y = y_function(d)
             if y is None:
                 continue
-            if self.isPlotable(x, y):
-                qp.drawPoint(int(x), int(y))
             if self.flag.draw_lines and i > 0:
                 prevx = self.getXPosition(data[i - 1])
                 prevy = y_function(data[i - 1])
@@ -713,6 +743,8 @@ class FrequencyChart(Chart):
                     new_x, new_y = self.getPlotable(prevx, prevy, x, y)
                     qp.drawLine(prevx, prevy, new_x, new_y)
                 qp.setPen(pen)
+            if self.isPlotable(x, y):
+                qp.drawPoint(int(x), int(y))
 
     def drawMarkers(self, qp, data=None, y_function=None):
         if data is None:

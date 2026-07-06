@@ -18,6 +18,7 @@
 #  along with this program.  If not, see <https://www.gnu.org/licenses/>.
 import contextlib
 import logging
+from math import floor, log10
 from time import monotonic, sleep
 from typing import TYPE_CHECKING
 
@@ -38,6 +39,7 @@ VALUE_MAX: float = 9.5
 RETRIES_RECONNECT: int = 3
 RETRIES_MAX: int = 10
 SEGMENT_TIMEOUT_S: float = 120.0
+LOG_SINGLE_POINT_SCAN_COOLDOWN_S: float = 0.02
 
 
 def truncate(values: list[list[complex]], count: int) -> list[list[complex]]:
@@ -60,6 +62,7 @@ def truncate(values: list[list[complex]], count: int) -> list[list[complex]]:
 
 class WorkerSignals(QObject):
     updated = Signal()
+    progress = Signal()
     finished = Signal()
     sweep_error = Signal()
 
@@ -93,7 +96,17 @@ class SweepWorker(QThread):
             self._run()
         except BaseException as exc:  # pylint: disable=broad-except
             logger.exception("%s", exc)
-            self.gui_error(f"ERROR during sweep\n\nStopped\n\n{exc}")
+            if self.app._batch_active:
+                action = (
+                    "Stopping batch; power-cycle the VNA"
+                    if isinstance(exc, VNACommandRetryExceeded)
+                    else "Continuing batch"
+                )
+                self.gui_error(f"ERROR during sweep\n\n{action}\n\n{exc}")
+                logger.debug('Sending "finished" signal after sweep error')
+                self.signals.finished.emit()
+            else:
+                self.gui_error(f"ERROR during sweep\n\nStopped\n\n{exc}")
             if logger.isEnabledFor(logging.DEBUG) and not self.app._batch_active:
                 raise exc
 
@@ -110,6 +123,8 @@ class SweepWorker(QThread):
         sweep = self.app.sweep.copy()
         if sweep != self.sweep:  # parameters changed
             self.sweep = sweep
+            self.init_data()
+        elif sweep.properties.logarithmic_measurement:
             self.init_data()
 
         self._run_loop()
@@ -134,6 +149,9 @@ class SweepWorker(QThread):
             else 1
         )
         logger.info("%d averages", averages)
+        if sweep.properties.logarithmic_measurement:
+            self._run_logarithmic_loop(averages)
+            return
 
         while True:
             for i in range(sweep.segments):
@@ -151,17 +169,69 @@ class SweepWorker(QThread):
             if sweep.properties.mode != SweepMode.CONTINOUS or self._terminate:
                 break
 
+    def _run_logarithmic_loop(self, averages: int) -> None:
+        frequencies = list(self.sweep.get_logarithmic_measurement_frequencies())
+        while True:
+            if self._terminate:
+                logger.debug("Stopping logarithmic sweep as signalled")
+                break
+
+            freq, values11, values21 = self.read_averaged_frequencies(
+                frequencies, averages
+            )
+            if not freq:
+                break
+            self.update_data(freq, values11, values21, 0)
+
+            if (
+                self.sweep.properties.mode != SweepMode.CONTINOUS
+                or self._terminate
+            ):
+                break
+
     def init_data(self) -> None:
         self.data11 = []
         self.data21 = []
         self.rawData11 = []
         self.rawData21 = []
-        for freq in self.sweep.get_frequencies():
+        if self.sweep.properties.logarithmic_measurement:
+            frequencies = list(
+                self.sweep.get_logarithmic_measurement_frequencies()
+            )
+        else:
+            frequencies = list(self.sweep.get_frequencies())
+        if self._init_from_previous_data(frequencies):
+            return
+        for freq in frequencies:
             self.data11.append(Datapoint(freq, 0.0, 0.0))
             self.data21.append(Datapoint(freq, 0.0, 0.0))
             self.rawData11.append(Datapoint(freq, 0.0, 0.0))
             self.rawData21.append(Datapoint(freq, 0.0, 0.0))
         logger.debug("Init data length: %s", len(self.data11))
+
+    def _init_from_previous_data(self, frequencies: list[int]) -> bool:
+        if not hasattr(self.app, "data"):
+            return False
+
+        previous11 = list(getattr(self.app.data, "s11", []))
+        previous21 = list(getattr(self.app.data, "s21", []))
+        if (
+            len(previous11) != len(frequencies)
+            or len(previous21) != len(frequencies)
+            or [p.freq for p in previous11] != frequencies
+            or [p.freq for p in previous21] != frequencies
+        ):
+            return False
+
+        self.data11 = previous11[:]
+        self.data21 = previous21[:]
+        self.rawData11 = previous11[:]
+        self.rawData21 = previous21[:]
+        logger.debug(
+            "Init data length: %s using previous display data",
+            len(self.data11),
+        )
+        return True
 
     def update_data(
         self,
@@ -200,6 +270,34 @@ class SweepWorker(QThread):
         )
         self.app.saveData(self.data11, self.data21)
         logger.debug('Sending "updated" signal')
+        self.signals.updated.emit()
+
+    def update_logarithmic_partial_data(
+        self,
+        frequencies: list[int],
+        values11: list[complex],
+        values21: list[complex],
+    ) -> None:
+        raw_data11 = [
+            Datapoint(freq, values11[i].real, values11[i].imag)
+            for i, freq in enumerate(frequencies)
+        ]
+        raw_data21 = [
+            Datapoint(freq, values21[i].real, values21[i].imag)
+            for i, freq in enumerate(frequencies)
+        ]
+
+        data11, data21 = self.applyCalibration(raw_data11, raw_data21)
+        logger.debug(
+            "Merging partial logarithmic data into display data (%d points)",
+            len(frequencies),
+        )
+        for i in range(len(frequencies)):
+            self.data11[i] = data11[i]
+            self.data21[i] = data21[i]
+            self.rawData11[i] = raw_data11[i]
+            self.rawData21[i] = raw_data21[i]
+        self.app.saveData(self.data11, self.data21)
         self.signals.updated.emit()
 
     def applyCalibration(
@@ -319,6 +417,182 @@ class SweepWorker(QThread):
             np.average(values11, axis=0).tolist(),
             np.average(values21, axis=0).tolist(),
         )
+
+    @staticmethod
+    def _first_decade_boundary(frequency: int) -> int:
+        return 10 ** (floor(log10(frequency)) + 1)
+
+    def read_averaged_frequencies(
+        self, frequencies: list[int], averages: int = 1
+    ) -> tuple[list[int], list[complex], list[complex]]:
+        logger.info(
+            "Reading %d logarithmic frequency points. Averaging %d values",
+            len(frequencies),
+            averages,
+        )
+
+        measured_freqs: list[int] = frequencies[:]
+        values11: list[list[complex]] = []
+        values21: list[list[complex]] = []
+        original_datapoints = self.app.vna.datapoints
+        total_reads = max(1, len(frequencies) * averages)
+        completed_reads = 0
+        next_partial_update = self._first_decade_boundary(frequencies[0])
+        points_per_scan = max(
+            1,
+            self.sweep.properties.logarithmic_points_per_scan,
+        )
+
+        try:
+            for i in range(averages):
+                if self._terminate:
+                    logger.debug("Stopping logarithmic averaging as signalled.")
+                    if averages == 1:
+                        break
+                    logger.warning(
+                        "Stop during logarithmic average. "
+                        "Discarding sweep result."
+                    )
+                    return [], [], []
+
+                logger.debug(
+                    "Reading logarithmic average no %d / %d",
+                    i + 1,
+                    averages,
+                )
+                tmp_freq: list[int] = []
+                tmp_11: list[complex] = []
+                tmp_21: list[complex] = []
+
+                for start_index in range(0, len(frequencies), points_per_scan):
+                    if self._terminate:
+                        break
+                    chunk = frequencies[
+                        start_index : start_index + points_per_scan
+                    ]
+                    self.app.vna.datapoints = len(chunk)
+                    measured_freq, point_11, point_21 = (
+                        self._read_segment_with_retries(chunk[0], chunk[-1])
+                    )
+                    if not point_11:
+                        raise IOError("Invalid data during logarithmic sweep")
+
+                    if len(point_11) == len(chunk):
+                        selected = list(range(len(chunk)))
+                    else:
+                        selected = [
+                            self._nearest_frequency_index(measured_freq, freq)
+                            for freq in chunk
+                        ]
+
+                    if len(chunk) > len(point_11):
+                        raise IOError("Invalid data during logarithmic sweep")
+
+                    for target_freq, measured_index in zip(chunk, selected):
+                        if tmp_freq and target_freq == tmp_freq[-1]:
+                            continue
+                        tmp_freq.append(target_freq)
+                        tmp_11.append(point_11[measured_index])
+                        tmp_21.append(point_21[measured_index])
+                        completed_reads += 1
+                        self.percentage = completed_reads * 100 / total_reads
+                        self.signals.progress.emit()
+                        while (
+                            averages == 1
+                            and tmp_freq[-1] >= next_partial_update
+                        ):
+                            self.update_logarithmic_partial_data(
+                                tmp_freq, tmp_11, tmp_21
+                            )
+                            next_partial_update *= 10
+                    if points_per_scan == 1 and not self._terminate:
+                        sleep(LOG_SINGLE_POINT_SCAN_COOLDOWN_S)
+                        self._note_activity()
+
+                if self._terminate:
+                    break
+                measured_freqs = tmp_freq
+                values11.append(tmp_11)
+                values21.append(tmp_21)
+
+        finally:
+            self.app.vna.datapoints = original_datapoints
+
+        if self._terminate:
+            return [], [], []
+
+        if not values11:
+            raise IOError("Invalid data during logarithmic sweep")
+
+        truncates = self.sweep.properties.averages[1]
+        if truncates > 0 and averages > 1:
+            logger.debug("Truncating %d values by %d", len(values11), truncates)
+            values11 = truncate(values11, truncates)
+            values21 = truncate(values21, truncates)
+
+        logger.debug("Averaging %d logarithmic values", len(values11[0]))
+        return (
+            measured_freqs,
+            np.average(values11, axis=0).tolist(),
+            np.average(values21, axis=0).tolist(),
+        )
+
+    @staticmethod
+    def _nearest_frequency_index(
+        measured_frequencies: list[int], target_frequency: int
+    ) -> int:
+        if not measured_frequencies:
+            return 0
+        return min(
+            range(len(measured_frequencies)),
+            key=lambda i: abs(measured_frequencies[i] - target_frequency),
+        )
+
+    def _read_segment_with_retries(
+        self, start: int, stop: int
+    ) -> tuple[list[int], list[complex], list[complex]]:
+        retries = RETRIES_RECONNECT
+        freq: list[int] = []
+        values11: list[complex] = []
+        values21: list[complex] = []
+
+        while retries and not values11:
+            self._note_activity()
+            if retries < RETRIES_RECONNECT:
+                logger.warning("retry readSegment(%s,%s)", start, stop)
+                sleep(0.5)
+                self._note_activity()
+            retries -= 1
+            segment_started = monotonic()
+            try:
+                freq, values11, values21 = self.read_segment(start, stop)
+            except VNACommandRetryExceeded as exc:
+                logger.warning(
+                    "readSegment(%s,%s) communication failed: %s",
+                    start,
+                    stop,
+                    exc,
+                )
+                with contextlib.suppress(Exception):
+                    self.app.vna.reconnect()
+                self._note_activity()
+                if retries:
+                    sleep(2.0)
+                    self._note_activity()
+                    continue
+                raise
+            elapsed = monotonic() - segment_started
+            if elapsed > SEGMENT_TIMEOUT_S:
+                logger.warning(
+                    "readSegment(%s,%s) took %.1fs; reconnecting",
+                    start,
+                    stop,
+                    elapsed,
+                )
+                with contextlib.suppress(Exception):
+                    self.app.vna.reconnect()
+
+        return freq, values11, values21
 
     def read_segment(
         self, start: int, stop: int

@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING
 from PySide6 import QtCore, QtGui, QtWidgets
 from PySide6.QtCore import Qt
 
+from ..Defaults import get_app_config
 from ..Formatting import (
     format_frequency_short,
     format_frequency_sweep,
@@ -109,6 +110,12 @@ class SweepSettingsWindow(QtWidgets.QWidget):
 
         layout.addRow(sweep_btn_layout)
 
+        if (
+            self.app.sweep.properties.logarithmic
+            and self.app.sweep.properties.logarithmic_measurement
+        ):
+            self.app.sweep.set_logarithmic(False)
+
         # Log sweep
         label = QtWidgets.QLabel(
             "Logarithmic sweeping changes the step width in each segment"
@@ -119,17 +126,63 @@ class SweepSettingsWindow(QtWidgets.QWidget):
         label.setWordWrap(True)
         label.setMinimumSize(600, 70)
         layout.addRow(label)
-        checkbox = QtWidgets.QCheckBox("Logarithmic sweep")
-        checkbox.setMinimumHeight(20)
-        checkbox.setCheckState(
+        self.checkbox_logarithmic = QtWidgets.QCheckBox("Logarithmic sweep")
+        self.checkbox_logarithmic.setMinimumHeight(20)
+        self.checkbox_logarithmic.setCheckState(
             Qt.CheckState.Checked
             if self.app.sweep.properties.logarithmic
             else Qt.CheckState.Unchecked
         )
-        checkbox.toggled.connect(
-            lambda: self.update_logarithmic(checkbox.isChecked())
+        self.checkbox_logarithmic.toggled.connect(
+            self.update_logarithmic
         )
-        layout.addRow(checkbox)
+        layout.addRow(self.checkbox_logarithmic)
+
+        label = QtWidgets.QLabel(
+            "Log-spaced measurement points measures the requested points"
+            " directly at logarithmically spaced frequencies. It does not"
+            " interpolate after measuring. Use fewer points per decade, or"
+            " more points per scan when the sweep takes too long."
+        )
+        label.setWordWrap(True)
+        label.setMinimumSize(600, 70)
+        layout.addRow(label)
+        self.checkbox_logarithmic_measurement = QtWidgets.QCheckBox(
+            "Log-spaced measurement points"
+        )
+        self.checkbox_logarithmic_measurement.setMinimumHeight(20)
+        self.checkbox_logarithmic_measurement.setCheckState(
+            Qt.CheckState.Checked
+            if self.app.sweep.properties.logarithmic_measurement
+            else Qt.CheckState.Unchecked
+        )
+        self.checkbox_logarithmic_measurement.toggled.connect(
+            self.update_logarithmic_measurement
+        )
+        layout.addRow(self.checkbox_logarithmic_measurement)
+
+        points_per_decade = QtWidgets.QSpinBox()
+        points_per_decade.setMinimumHeight(20)
+        points_per_decade.setRange(1, 1000)
+        points_per_decade.setValue(
+            self.app.sweep.properties.logarithmic_points_per_decade
+        )
+        points_per_decade.valueChanged.connect(
+            self.update_logarithmic_points_per_decade
+        )
+        layout.addRow("Log points per decade", points_per_decade)
+        points_per_scan = QtWidgets.QSpinBox()
+        points_per_scan.setMinimumHeight(20)
+        points_per_scan.setRange(1, 101)
+        points_per_scan.setValue(
+            self.app.sweep.properties.logarithmic_points_per_scan
+        )
+        points_per_scan.valueChanged.connect(
+            self.update_logarithmic_points_per_scan
+        )
+        layout.addRow("Log points per scan", points_per_scan)
+        if self.app.sweep.properties.logarithmic_measurement:
+            self.enable_chart_lines()
 
         # Averaging
         label = QtWidgets.QLabel(
@@ -296,7 +349,54 @@ class SweepSettingsWindow(QtWidgets.QWidget):
 
     def update_logarithmic(self, logarithmic: bool):
         logger.debug("update_logarithmic(%s)", logarithmic)
+        if logarithmic:
+            self.checkbox_logarithmic_measurement.blockSignals(True)
+            self.checkbox_logarithmic_measurement.setChecked(False)
+            self.checkbox_logarithmic_measurement.blockSignals(False)
+            self.app.sweep.set_logarithmic_measurement(False)
         self.app.sweep.set_logarithmic(logarithmic)
+        self.app.sweep_control.update_step_size()
+
+    def update_logarithmic_measurement(self, logarithmic: bool):
+        logger.debug("update_logarithmic_measurement(%s)", logarithmic)
+        if logarithmic:
+            self.checkbox_logarithmic.blockSignals(True)
+            self.checkbox_logarithmic.setChecked(False)
+            self.checkbox_logarithmic.blockSignals(False)
+            self.app.sweep.set_logarithmic(False)
+            self.enable_chart_lines()
+        self.app.sweep.set_logarithmic_measurement(logarithmic)
+        self.app.sweep_control.update_step_size()
+
+    def enable_chart_lines(self):
+        app_config = get_app_config()
+        app_config.chart.show_lines = True
+        if app_config.chart.point_size < 3:
+            app_config.chart.point_size = 3
+        for chart in self.app.subscribing_charts:
+            chart.setDrawLines(True)
+            chart.setPointSize(app_config.chart.point_size)
+
+        display_window = getattr(self.app, "windows", {}).get(
+            "display_settings"
+        )
+        if display_window is not None:
+            display_window.show_lines_option.blockSignals(True)
+            display_window.show_lines_option.setChecked(True)
+            display_window.show_lines_option.blockSignals(False)
+            display_window.pointSizeInput.blockSignals(True)
+            display_window.pointSizeInput.setValue(app_config.chart.point_size)
+            display_window.pointSizeInput.blockSignals(False)
+
+    def update_logarithmic_points_per_decade(self, points: int):
+        logger.debug("update_logarithmic_points_per_decade(%s)", points)
+        self.app.sweep.set_logarithmic_points_per_decade(points)
+        self.app.sweep_control.update_step_size()
+
+    def update_logarithmic_points_per_scan(self, points: int):
+        logger.debug("update_logarithmic_points_per_scan(%s)", points)
+        self.app.sweep.set_logarithmic_points_per_scan(points)
+        self.app.sweep_control.update_step_size()
 
     def update_mode(self, mode: "SweepMode"):
         logger.debug("update_mode(%s)", mode)

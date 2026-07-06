@@ -42,7 +42,12 @@ from ..Formatting import (
     format_wavelength,
     parse_frequency,
 )
-from .Values import TYPES, Value, default_label_ids
+from .Values import (
+    CAL_S21_REAL_IMAG_SHUNT_LABEL,
+    TYPES,
+    Value,
+    default_label_ids,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -106,9 +111,17 @@ class Marker(QtCore.QObject, Value):
 
         if self.qsettings:
             Marker._instances += 1
-            Marker.active_labels = self.qsettings.value(
+            active_labels = self.qsettings.value(
                 "MarkerFields", defaultValue=default_label_ids(), type=list
             )  # type: ignore
+            if not self.qsettings.value(
+                "MarkerFieldsCalS21Migrated", False, bool
+            ):
+                if CAL_S21_REAL_IMAG_SHUNT_LABEL not in active_labels:
+                    active_labels.append(CAL_S21_REAL_IMAG_SHUNT_LABEL)
+                    self.qsettings.setValue("MarkerFields", active_labels)
+                self.qsettings.setValue("MarkerFieldsCalS21Migrated", True)
+            Marker.active_labels = active_labels
             self.index = Marker._instances
 
         if not self.name:
@@ -320,8 +333,19 @@ class Marker(QtCore.QObject, Value):
         for v in self.label.values():
             v.setText("")
 
+    @staticmethod
+    def _nearest_datapoint(
+        data: list[RFTools.Datapoint], freq: int
+    ) -> RFTools.Datapoint | None:
+        if not data:
+            return None
+        return min(data, key=lambda point: abs(point.freq - freq))
+
     def updateLabels(
-        self, s11: list[RFTools.Datapoint], s21: list[RFTools.Datapoint]
+        self,
+        s11: list[RFTools.Datapoint],
+        s21: list[RFTools.Datapoint],
+        s21_cal: list[RFTools.Datapoint] | None = None,
     ):
         if not s11:
             return
@@ -412,3 +436,13 @@ class Marker(QtCore.QObject, Value):
             self.label["s21realimagseries"].setText(
                 format_complex_imp(_s21.seriesImpedance(), allow_negative=True)
             )
+
+        _s21_cal = self._nearest_datapoint(s21_cal or [], _s11.freq)
+        if _s21_cal is not None:
+            self.label["cals21realimagshunt"].setText(
+                format_complex_imp(
+                    _s21_cal.shuntImpedance(), allow_negative=True
+                )
+            )
+        else:
+            self.label["cals21realimagshunt"].setText("")

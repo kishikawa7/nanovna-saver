@@ -53,6 +53,7 @@ USBDEVICETYPES = (
 RETRIES = 3
 TIMEOUT = 0.2
 WAIT = 0.05
+DETECTION_WRITE_TIMEOUT = 2.0
 
 NAME2DEVICE = {
     "S-A-A-2": NanoVNA_V2,
@@ -120,10 +121,29 @@ def get_interfaces() -> list[Interface]:
         try:
             iface.open()
             iface.comment = get_comment(iface)
+            if not iface.comment:
+                logger.warning("Skipping unresponsive VNA port %s", d.device)
+                continue
         except Exception as exc:
             logger.warning("Skipping unresponsive VNA port %s: %s", d.device, exc)
             continue
         finally:
+            try:
+                iface.cancel_read()
+            except Exception:
+                pass
+            try:
+                iface.cancel_write()
+            except Exception:
+                pass
+            try:
+                iface.reset_input_buffer()
+            except Exception:
+                pass
+            try:
+                iface.reset_output_buffer()
+            except Exception:
+                pass
             try:
                 iface.close()
             except Exception:
@@ -157,6 +177,8 @@ def get_comment(iface: Interface) -> str:
     logger.info("Finding correct VNA type...")
     with iface.lock:
         vna_version = detect_version(iface)
+    if not vna_version:
+        return ""
     if vna_version == "v2":
         return "S-A-A-2"
     if vna_version == "lite_vna_64":
@@ -186,51 +208,87 @@ def get_comment(iface: Interface) -> str:
 
 def detect_version(serial_port: serial.Serial) -> str:
     data = ""
-    for i in range(RETRIES):
-        drain_serial(serial_port)
-        serial_port.write("\r".encode("ascii"))
-        # workaround for some UnicodeDecodeError ... repeat ;-)
-        drain_serial(serial_port)
-        serial_port.write("\r".encode("ascii"))
-        sleep(0.05)
+    old_timeout = getattr(serial_port, "timeout", None)
+    old_write_timeout = getattr(serial_port, "write_timeout", None)
+    try:
+        serial_port.timeout = TIMEOUT
+        serial_port.write_timeout = DETECTION_WRITE_TIMEOUT
+        for i in range(RETRIES):
+            drain_serial(serial_port)
+            serial_port.write("\r".encode("ascii"))
+            # workaround for some UnicodeDecodeError ... repeat ;-)
+            drain_serial(serial_port)
+            serial_port.write("\r".encode("ascii"))
+            sleep(0.05)
 
-        data = serial_port.read(128).decode("ascii")
-        if data.startswith("ch> "):
-            return "v1"
-        # -H versions
-        if data.startswith("\r\nch> "):
-            return "vh"
-        if data.startswith("\r\n?\r\nch> "):
-            return "vh"
-        if data.startswith("2"):
-            return (
-                "lite_vna_64" if LiteVNA64.is_lite_vna_64(serial_port) else "v2"
-            )
-        logger.debug("Retry detection: %s", i + 1)
+            data = serial_port.read(128).decode("ascii")
+            if data.startswith("ch> "):
+                return "v1"
+            # -H versions
+            if data.startswith("\r\nch> "):
+                return "vh"
+            if data.startswith("\r\n?\r\nch> "):
+                return "vh"
+            if data.startswith("2"):
+                return (
+                    "lite_vna_64"
+                    if LiteVNA64.is_lite_vna_64(serial_port)
+                    else "v2"
+                )
+            logger.debug("Retry detection: %s", i + 1)
+    except Exception as exc:
+        logger.warning("VNA detection failed: %s", exc)
+        return ""
+    finally:
+        try:
+            serial_port.timeout = old_timeout
+        except Exception:
+            pass
+        try:
+            serial_port.write_timeout = old_write_timeout
+        except Exception:
+            pass
     logger.error("No VNA detected. Hardware responded to CR with: %s", data)
     return ""
 
 
 def get_info(serial_port: serial.Serial) -> str:
-    for _ in range(RETRIES):
-        drain_serial(serial_port)
-        serial_port.write("info\r".encode("ascii"))
-        lines = []
-        retries = 0
-        while True:
-            line = serial_port.readline().decode("ascii").strip()
-            if not line:
-                retries += 1
-                if retries > RETRIES:
-                    return ""
-                sleep(WAIT)
-                continue
-            if line == "info":  # suppress echo
-                continue
-            if line.startswith("ch>"):
-                logger.debug("Needed retries: %s", retries)
-                break
-            lines.append(line)
-        logger.debug("Info output: %s", lines)
-        return "\n".join(lines)
+    old_timeout = getattr(serial_port, "timeout", None)
+    old_write_timeout = getattr(serial_port, "write_timeout", None)
+    try:
+        serial_port.timeout = TIMEOUT
+        serial_port.write_timeout = DETECTION_WRITE_TIMEOUT
+        for _ in range(RETRIES):
+            drain_serial(serial_port)
+            serial_port.write("info\r".encode("ascii"))
+            lines = []
+            retries = 0
+            while True:
+                line = serial_port.readline().decode("ascii").strip()
+                if not line:
+                    retries += 1
+                    if retries > RETRIES:
+                        return ""
+                    sleep(WAIT)
+                    continue
+                if line == "info":  # suppress echo
+                    continue
+                if line.startswith("ch>"):
+                    logger.debug("Needed retries: %s", retries)
+                    break
+                lines.append(line)
+            logger.debug("Info output: %s", lines)
+            return "\n".join(lines)
+    except Exception as exc:
+        logger.warning("VNA info read failed: %s", exc)
+        return ""
+    finally:
+        try:
+            serial_port.timeout = old_timeout
+        except Exception:
+            pass
+        try:
+            serial_port.write_timeout = old_write_timeout
+        except Exception:
+            pass
     return ""

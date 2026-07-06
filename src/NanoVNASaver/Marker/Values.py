@@ -29,6 +29,8 @@ class Label(NamedTuple):
     default_active: bool
 
 
+CAL_S21_REAL_IMAG_SHUNT_LABEL = "cals21realimagshunt"
+
 TYPES = (
     Label("actualfreq", "Frequency", "Actual frequency", True),
     Label("lambda", "Wavelength", "Wavelength", False),
@@ -58,6 +60,12 @@ TYPES = (
     Label("s21magshunt", "S21 |Z| shunt", "S21 Z Magnitude shunt", False),
     Label("s21magseries", "S21 |Z| series", "S21 Z Magnitude series", False),
     Label("s21realimagshunt", "S21 R+jX shunt", "S21 Z Real+Imag shunt", False),
+    Label(
+        CAL_S21_REAL_IMAG_SHUNT_LABEL,
+        "Cal S21 R+jX shunt",
+        "Calibrated S21 Z Real+Imag shunt",
+        True,
+    ),
     Label(
         "s21realimagseries", "S21 R+jX series", "S21 Z Real+Imag series", False
     ),

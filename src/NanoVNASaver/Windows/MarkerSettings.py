@@ -22,7 +22,11 @@ from typing import TYPE_CHECKING, ClassVar
 from PySide6 import QtCore, QtGui, QtWidgets
 from PySide6.QtCore import Qt
 
-from ..Marker.Values import TYPES, default_label_ids
+from ..Marker.Values import (
+    CAL_S21_REAL_IMAG_SHUNT_LABEL,
+    TYPES,
+    default_label_ids,
+)
 from ..Marker.Widget import Marker
 from ..RFTools import Datapoint
 from .ui import get_window_icon
@@ -77,6 +81,16 @@ class MarkerSettingsWindow(QtWidgets.QWidget):
         if self.savedFieldSelection == "":
             self.savedFieldSelection = []
 
+        if not self.app.settings.value(
+            "MarkerFieldsCalS21Migrated", False, bool
+        ):
+            if CAL_S21_REAL_IMAG_SHUNT_LABEL not in self.savedFieldSelection:
+                self.savedFieldSelection.append(CAL_S21_REAL_IMAG_SHUNT_LABEL)
+                self.app.settings.setValue(
+                    "MarkerFields", self.savedFieldSelection
+                )
+            self.app.settings.setValue("MarkerFieldsCalS21Migrated", True)
+
         self.currentFieldSelection = self.savedFieldSelection[:]
 
         self.active_labels_view = QtWidgets.QListView()
@@ -119,7 +133,7 @@ class MarkerSettingsWindow(QtWidgets.QWidget):
         self.exampleMarker.findLocation(self.EXAMPLE_DATA11)
         self.exampleMarker.resetLabels()
         self.exampleMarker.updateLabels(
-            self.EXAMPLE_DATA11, self.EXAMPLE_DATA21
+            self.EXAMPLE_DATA11, self.EXAMPLE_DATA21, self.EXAMPLE_DATA21
         )
 
     def updateField(self, field: QtGui.QStandardItem):
