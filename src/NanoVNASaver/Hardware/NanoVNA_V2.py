@@ -152,7 +152,16 @@ class NanoVNA_V2(VNA):
             for i in range(self.datapoints)
         ]
 
-    def _read_pointstoread(self, pointstoread, arr) -> None:
+    def _is_vna6000(self) -> bool:
+        return str(getattr(self, "board_revision", "")) == "2.0.51"
+
+    def _readfifo_timeout(self, pointstodo: int) -> float:
+        timeout = min(pointstodo, 255) * 0.035 + 0.1
+        if self._is_vna6000():
+            timeout = max(timeout, min(pointstodo, 255) * 0.06 + 0.5)
+        return timeout
+
+    def _read_pointstoread(self, pointstoread, arr, seen: set[int]) -> None:
         freq_index = -1
 
         for i in range(pointstoread):
@@ -168,11 +177,81 @@ class NanoVNA_V2(VNA):
             fwd = complex(fwd_real, fwd_imag)
             refl = complex(rev0_real, rev0_imag)
             thru = complex(rev1_real, rev1_imag)
+            if not 0 <= freq_index < len(self._sweepdata):
+                raise ValueError(
+                    f"Invalid FIFO frequency index {freq_index} "
+                    f"for {len(self._sweepdata)} points"
+                )
+            if freq_index in seen:
+                raise ValueError(
+                    f"Duplicate FIFO frequency index {freq_index}"
+                )
+            if fwd == 0:
+                raise ValueError(
+                    f"Zero forward sample at frequency index {freq_index}"
+                )
+            seen.add(freq_index)
             if i == 0:
                 logger.debug("Freq index from: %i", freq_index)
             self._sweepdata[freq_index] = (refl / fwd, thru / fwd)
 
         logger.debug("Freq index to: %i", freq_index)
+
+    def _read_fifo_into_sweepdata(self, s21hack: int) -> bool:
+        self.serial.write(pack("<Q", 0))
+        sleep(WRITE_SLEEP)
+        # cmd: write register 0x30 to clear FIFO
+        self.serial.write(pack("<BBB", _CMD_WRITE, _ADDR_VALUES_FIFO, 0))
+        sleep(WRITE_SLEEP)
+        # clear sweepdata
+        self._sweepdata = [(complex(), complex())] * (
+            self.datapoints + s21hack
+        )
+        pointstodo = self.datapoints + s21hack
+        seen_indexes: set[int] = set()
+        # we read at most 255 values at a time and the time required
+        # empirically is just over 3 seconds for 101 points or
+        # 7 seconds for 255 points
+        self.serial.timeout = self._readfifo_timeout(pointstodo)
+        while pointstodo > 0:
+            logger.info("reading values")
+            pointstoread = min(255, pointstodo)
+            # cmd: read FIFO, addr 0x30
+            self.serial.write(
+                pack(
+                    "<BBB",
+                    _CMD_READFIFO,
+                    _ADDR_VALUES_FIFO,
+                    pointstoread,
+                )
+            )
+            sleep(WRITE_SLEEP)
+            # each value is 32 bytes
+            nBytes = pointstoread * 32
+
+            # serial .read() will try to read nBytes bytes in timeout secs
+            arr = self.serial.read(nBytes)
+            if nBytes != len(arr):
+                logger.warning("expected %d bytes, got %d", nBytes, len(arr))
+                # the way to retry on timeout is keep the data already read
+                # then try to read the rest of the data into the array
+                if nBytes > len(arr):
+                    arr = arr + self.serial.read(nBytes - len(arr))
+            if nBytes != len(arr):
+                return False
+
+            self._read_pointstoread(pointstoread, arr, seen_indexes)
+
+            pointstodo = pointstodo - pointstoread
+        expected_indexes = set(range(self.datapoints + s21hack))
+        missing_indexes = expected_indexes - seen_indexes
+        if missing_indexes:
+            missing_preview = sorted(missing_indexes)[:10]
+            raise ValueError(
+                "Missing FIFO frequency indexes "
+                f"{missing_preview}"
+            )
+        return True
 
     def readValues(self, value) -> list[complex]:
         # Actually grab the data only when requesting channel 0.
@@ -182,57 +261,11 @@ class NanoVNA_V2(VNA):
             # reset protocol to known state
             timeout = self.serial.timeout
             with self.serial.lock:
-                self.serial.write(pack("<Q", 0))
-                sleep(WRITE_SLEEP)
-                # cmd: write register 0x30 to clear FIFO
-                self.serial.write(
-                    pack("<BBB", _CMD_WRITE, _ADDR_VALUES_FIFO, 0)
-                )
-                sleep(WRITE_SLEEP)
-                # clear sweepdata
-                self._sweepdata = [(complex(), complex())] * (
-                    self.datapoints + s21hack
-                )
-                pointstodo = self.datapoints + s21hack
-                # we read at most 255 values at a time and the time required
-                # empirically is just over 3 seconds for 101 points or
-                # 7 seconds for 255 points
-                self.serial.timeout = min(pointstodo, 255) * 0.035 + 0.1
-                while pointstodo > 0:
-                    logger.info("reading values")
-                    pointstoread = min(255, pointstodo)
-                    # cmd: read FIFO, addr 0x30
-                    self.serial.write(
-                        pack(
-                            "<BBB",
-                            _CMD_READFIFO,
-                            _ADDR_VALUES_FIFO,
-                            pointstoread,
-                        )
-                    )
-                    sleep(WRITE_SLEEP)
-                    # each value is 32 bytes
-                    nBytes = pointstoread * 32
-
-                    # serial .read() will try to read nBytes bytes in
-                    # timeout secs
-                    arr = self.serial.read(nBytes)
-                    if nBytes != len(arr):
-                        logger.warning(
-                            "expected %d bytes, got %d", nBytes, len(arr)
-                        )
-                        # the way to retry on timeout is keep the data
-                        # already read then try to read the rest of
-                        # the data into the array
-                        if nBytes > len(arr):
-                            arr = arr + self.serial.read(nBytes - len(arr))
-                    if nBytes != len(arr):
+                try:
+                    if not self._read_fifo_into_sweepdata(s21hack):
                         return []
-
-                    self._read_pointstoread(pointstoread, arr)
-
-                    pointstodo = pointstodo - pointstoread
-            self.serial.timeout = timeout
+                finally:
+                    self.serial.timeout = timeout
 
             if s21hack:
                 self._sweepdata = self._sweepdata[1:]
@@ -269,7 +302,11 @@ class NanoVNA_V2(VNA):
         return result
 
     def setSweep(self, start, stop):
-        step = (stop - start) / (self.datapoints - 1)
+        step = (
+            0
+            if self.datapoints <= 1
+            else (stop - start) / (self.datapoints - 1)
+        )
         if start == self.sweepStartHz and step == self.sweepStepHz:
             return
         self.sweepStartHz = start
@@ -280,6 +317,8 @@ class NanoVNA_V2(VNA):
             self.sweepStepHz,
         )
         self._updateSweep()
+        if self._is_vna6000():
+            sleep(0.2)
         return
 
     def _updateSweep(self):

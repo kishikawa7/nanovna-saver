@@ -431,6 +431,8 @@ class DisplaySettingsWindow(QtWidgets.QWidget):
                 self.app.data.s11,
                 self.app.data.s21,
                 self.app.calibrated_s21,
+                self.app.cal_shunt_z,
+                self.app.cal_shunt_z_short_corrected,
             )
         self.marker_window.exampleMarker.returnloss_is_positive = state
         self.marker_window.updateMarker()

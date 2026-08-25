@@ -17,7 +17,9 @@
 #  You should have received a copy of the GNU General Public License
 #  along with this program.  If not, see <https://www.gnu.org/licenses/>.
 import logging
+import os
 from contextlib import suppress
+from pathlib import Path
 from time import monotonic, sleep
 from typing import Iterator
 
@@ -45,6 +47,52 @@ WAIT = 0.05
 MIN_COMMAND_WAIT = 0.20
 COMMAND_TIMEOUT = 35.0
 RECONNECT_SETTLE_TIME = 1.0
+USBDEVFS_RESET = (ord("U") << 8) | 20
+
+
+def _usb_device_node_for_serial(port: str | None) -> Path | None:
+    """Resolve a tty device to its corresponding usbfs device node."""
+    if not port:
+        return None
+
+    tty_name = Path(port).resolve().name
+    sysfs_device = Path("/sys/class/tty") / tty_name / "device"
+    if not sysfs_device.exists():
+        return None
+
+    device = sysfs_device.resolve()
+    for parent in (device, *device.parents):
+        busnum_path = parent / "busnum"
+        devnum_path = parent / "devnum"
+        if not busnum_path.exists() or not devnum_path.exists():
+            continue
+        busnum = int(busnum_path.read_text(encoding="ascii").strip())
+        devnum = int(devnum_path.read_text(encoding="ascii").strip())
+        return Path(f"/dev/bus/usb/{busnum:03d}/{devnum:03d}")
+    return None
+
+
+def _reset_usb_device_for_serial(port: str | None) -> bool:
+    """Best-effort Linux USB-level reset for a serial device."""
+    usb_device = _usb_device_node_for_serial(port)
+    if usb_device is None:
+        logger.warning("Could not resolve USB device for serial port %s", port)
+        return False
+
+    try:
+        import fcntl  # Linux-only; usbfs is unavailable on other platforms.
+
+        fd = os.open(usb_device, os.O_WRONLY | os.O_CLOEXEC)
+        try:
+            fcntl.ioctl(fd, USBDEVFS_RESET, 0)
+        finally:
+            os.close(fd)
+    except OSError as exc:
+        logger.warning("USB reset failed for %s: %s", usb_device, exc)
+        return False
+
+    logger.info("USB reset completed for %s", usb_device)
+    return True
 
 
 def _max_retries(bandwidth: int, datapoints: int) -> int:
@@ -372,7 +420,7 @@ class VNA:
             sleep(0.1)
 
     def power_reset(self):
-        """Send the NanoVNA shell reset command without waiting for a prompt."""
+        """Reset the NanoVNA MCU without waiting for a prompt."""
         if not self.connected():
             raise IOError("VNA is not connected")
         with self.serial.lock:

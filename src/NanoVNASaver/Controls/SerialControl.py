@@ -98,6 +98,14 @@ class SerialControl(Control):
                 return True
         return False
 
+    def select_serial_number(self, serial_number: str) -> bool:
+        for index in range(self.inp_port.count()):
+            iface = self.inp_port.itemData(index)
+            if getattr(iface, "usb_serial_number", None) == serial_number:
+                self.inp_port.setCurrentIndex(index)
+                return True
+        return False
+
     def serialButtonClick(self):
         if not self.app.vna.connected():
             self.connect_device()

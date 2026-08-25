@@ -39,7 +39,7 @@ VALUE_MAX: float = 9.5
 RETRIES_RECONNECT: int = 3
 RETRIES_MAX: int = 10
 SEGMENT_TIMEOUT_S: float = 120.0
-LOG_SINGLE_POINT_SCAN_COOLDOWN_S: float = 0.02
+LOG_SINGLE_POINT_SCAN_COOLDOWN_S: float = 0.03
 
 
 def truncate(values: list[list[complex]], count: int) -> list[list[complex]]:
@@ -98,7 +98,7 @@ class SweepWorker(QThread):
             logger.exception("%s", exc)
             if self.app._batch_active:
                 action = (
-                    "Stopping batch; power-cycle the VNA"
+                    "Attempting USB recovery"
                     if isinstance(exc, VNACommandRetryExceeded)
                     else "Continuing batch"
                 )

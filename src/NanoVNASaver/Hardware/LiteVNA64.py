@@ -221,7 +221,11 @@ class LiteVNA64(NanoVNA_V2):
     def setSweep(self, start, stop):
         # Device loose these value after going to idle mode
         # Do not try to cache them locally
-        step = (stop - start) / (self.datapoints - 1)
+        step = (
+            0
+            if self.datapoints <= 1
+            else (stop - start) / (self.datapoints - 1)
+        )
         self.sweepStartHz = start
         self.sweepStepHz = step
         logger.info(

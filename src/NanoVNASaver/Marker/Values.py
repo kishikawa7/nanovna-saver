@@ -30,6 +30,8 @@ class Label(NamedTuple):
 
 
 CAL_S21_REAL_IMAG_SHUNT_LABEL = "cals21realimagshunt"
+CAL_SHUNT_Z_FORMULA_LABEL = "calshuntzformula"
+CAL_SHUNT_Z_FORMULA_SHORT_LABEL = "calshuntzformulashort"
 
 TYPES = (
     Label("actualfreq", "Frequency", "Actual frequency", True),
@@ -64,6 +66,18 @@ TYPES = (
         CAL_S21_REAL_IMAG_SHUNT_LABEL,
         "Cal S21 R+jX shunt",
         "Calibrated S21 Z Real+Imag shunt",
+        True,
+    ),
+    Label(
+        CAL_SHUNT_Z_FORMULA_LABEL,
+        "Cal ShuntZ formula R+jX",
+        "Calibrated shunt impedance from formula",
+        True,
+    ),
+    Label(
+        CAL_SHUNT_Z_FORMULA_SHORT_LABEL,
+        "Cal ShuntZ fixture-corr R+jX",
+        "Calibrated shunt impedance from formula minus socket short/open",
         True,
     ),
     Label(

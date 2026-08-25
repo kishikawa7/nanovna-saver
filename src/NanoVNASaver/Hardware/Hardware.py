@@ -118,6 +118,7 @@ def get_interfaces() -> list[Interface]:
         )
         iface = Interface("serial", typename)
         iface.port = d.device
+        iface.usb_serial_number = d.serial_number
         try:
             iface.open()
             iface.comment = get_comment(iface)

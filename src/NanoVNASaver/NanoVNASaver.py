@@ -18,6 +18,7 @@
 #  along with this program.  If not, see <https://www.gnu.org/licenses/>.
 import contextlib
 import logging
+import math
 import threading
 import warnings
 from time import localtime, monotonic, strftime
@@ -54,6 +55,7 @@ from .Charts import (
     QualityFactorChart,
     RealImaginaryMuChart,
     RealImaginaryZChart,
+    RealImaginaryZComputedChart,
     RealImaginaryZSeriesChart,
     RealImaginaryZShuntChart,
     SmithChart,
@@ -69,10 +71,10 @@ from .Defaults import APP_SETTINGS, AppSettings, get_app_config
 from .FileDialogs import get_existing_directory
 from .Formatting import format_frequency, format_gain, format_vswr
 from .Hardware.Hardware import Interface
-from .Hardware.VNA import VNA
+from .Hardware.VNA import VNA, _reset_usb_device_for_serial
 from .Marker.Delta import DeltaMarker
 from .Marker.Widget import Marker
-from .RFTools import corr_att_data
+from .RFTools import Datapoint, corr_att_data
 from .Settings.Bands import BandsModel
 from .Settings.Sweep import Sweep
 from .SweepWorker import SweepWorker
@@ -103,18 +105,11 @@ MIN_WINDOW_WIDTH = 800
 MIN_WINDOW_HEIGHT = 600
 BATCH_SWEEP_STALL_TIMEOUT_S = 180
 BATCH_WATCHDOG_INTERVAL_MS = 30 * 1000
+BATCH_SCHEDULE_GRACE_S = 60
 BATCH_CONNECTION_REFRESH_SWEEPS = 100
 BATCH_CONNECTION_REFRESH_INTERVAL_S = 60 * 60
 BATCH_ERROR_RECOVERY_COOLDOWN_MS = 15 * 1000
-BATCH_MAX_RECOVERY_FAILURES = 2
-BATCH_FATAL_COMMUNICATION_ERRORS = (
-    "command timeout",
-    "write failed",
-    "Write timeout",
-    "readline failed",
-    "serial is not open",
-    "device disconnected",
-)
+BATCH_MAX_RECOVERY_FAILURES = 5
 REBOOT_RECONNECT_INTERVAL_MS = 1000
 REBOOT_RECONNECT_ATTEMPTS = 20
 
@@ -155,10 +150,8 @@ def make_full_thru_network(ntwk):
     s = ntwk.s.copy()
     n = s.shape[0]
     s_full = np.zeros((n, 2, 2), dtype=complex)
-    # extract available elements (fall back to zeros if missing)
-    s11 = s[:, 0, 0] if s.shape[1] >= 2 else np.zeros(n, dtype=complex)
+    s11 = s[:, 0, 0] if s.shape[1] >= 1 else np.zeros(n, dtype=complex)
     s21 = s[:, 1, 0] if s.shape[1] >= 2 else np.zeros(n, dtype=complex)
-    # assign symmetric/full values: S22 = S11, S12 = S21
     s_full[:, 0, 0] = s11
     s_full[:, 1, 1] = s11
     s_full[:, 1, 0] = s21
@@ -168,51 +161,165 @@ def make_full_thru_network(ntwk):
     return nt
 
 
-# calpath = '/home/keisuke/Documents/Spara/caldata/nanoVNAH4/20260325_nanoVNAH4_nocal_IF10Hz/'
-# calpath = '/home/keisuke/Documents/Spara/caldata/nanoVNAH4/20260424_nanoVNAH4_DCcut/'
-calpath = '/home/keisuke/Documents/Spara/caldata/nanoVNAH4/20260615_nano_VNAH4_DCblock/'
+DEFAULT_EXTERNAL_CALPATH = (
+    "/home/keisuke/Documents/Spara/caldata/nanoVNAH4/"
+    "20260710_nanoVNAH4_woDCcut_logarithmic_whitecable_10k1G/"
+)
+VNA6000_EXTERNAL_CALPATH = (
+    "/home/keisuke/Documents/Spara/caldata/VNA6000/"
+    "20260709_VNA6000_100k_6G_woDCcut/"
+)
 datalist = ['short','open','load','thru']
-caldata = {}
-for k in datalist:
-    caldata[k] = {'ntwk': get_S2P_nVNA(f'{calpath}S_{k}.s2p')}
-
-freq = caldata['short']['ntwk'].frequency
-beta = 2*np.pi*freq.f / RF_C   # 自由空間の β（簡易）
-media = DefinedGammaZ0(frequency=freq, z0=50, gamma=1j*beta)
-
-ideals = [media.short(nports=2), media.open(nports=2), media.match(nports=2), media.thru()]
-
-
+SOCKET_SHORT_NAME = "socket_short"
+SOCKET_OPEN_NAME = "socket_open"
 kVNApath = '/home/keisuke/Documents/Spara/caldata/20260407_30k-9G_IF100Hz_-10dBm_801pt_ave10_150mm/'
 ansdata = {}
 for i in ['short_P1', 'open_P1', 'load_P1', 'short_P2', 'open_P2', 'load_P2', 'thru']:
     ansdata[i] = rf.Network(f'{kVNApath}S_{i}.s2p')
-    ansdata[f'fix{i}'] = ansdata[i].interpolate(freq, kind='linear', fill_value='extrapolate')
 
-
-ans_ideals = [
-    rf.two_port_reflect(ansdata['fixshort_P1'].s11, ansdata['fixshort_P2'].s22),
-    rf.two_port_reflect(ansdata['fixopen_P1'].s11, ansdata['fixopen_P2'].s22),
-    rf.two_port_reflect(ansdata['fixload_P1'].s11, ansdata['fixload_P2'].s22),
-    ansdata['fixthru'],
-]
-
-
-measured_thru  = caldata['thru']['ntwk']
-short_meas_2p = two_port_reflect(caldata['short']['ntwk'].s11, caldata['short']['ntwk'].s11)
-open_meas_2p  = two_port_reflect(caldata['open']['ntwk'].s11,  caldata['open']['ntwk'].s11)
-load_meas_2p  = two_port_reflect(caldata['load']['ntwk'].s11,  caldata['load']['ntwk'].s11)
-measured = [short_meas_2p, open_meas_2p,load_meas_2p,measured_thru]# Idealsと同じ順番でリストにする
-
-cal = SOLT(
-    ideals=ans_ideals,
-    measured=measured,
-    n_ports=2,  # 2ポート校正であることを明示
-    # isolation=data['iso']['ntwk']
-        )
-
+calpath = ""
+caldata = {}
+freq = None
+media = None
+ideals = []
+ans_ideals = []
+measured = []
+cal = None
 _cal_cache_key = ()
-_cal_cache = cal
+_cal_cache = None
+
+
+def _ensure_calpath(path: str) -> str:
+    return path if path.endswith("/") else f"{path}/"
+
+
+def _load_external_calibration(path: str):
+    loaded_caldata = {}
+    for name in datalist:
+        loaded_caldata[name] = {
+            'ntwk': get_S2P_nVNA(f'{path}S_{name}.s2p')
+        }
+    socket_short_path = Path(path) / "S_socket_short.s2p"
+    if socket_short_path.exists():
+        loaded_caldata[SOCKET_SHORT_NAME] = {
+            "ntwk": get_S2P_nVNA(str(socket_short_path))
+        }
+    else:
+        logger.warning("Socket short file not found: %s", socket_short_path)
+    socket_open_path = Path(path) / "S_socket_open.s2p"
+    if socket_open_path.exists():
+        loaded_caldata[SOCKET_OPEN_NAME] = {
+            "ntwk": get_S2P_nVNA(str(socket_open_path))
+        }
+
+    loaded_freq = loaded_caldata['short']['ntwk'].frequency
+    beta = 2*np.pi*loaded_freq.f / RF_C   # 自由空間の β（簡易）
+    loaded_media = DefinedGammaZ0(
+        frequency=loaded_freq, z0=50, gamma=1j*beta
+    )
+    loaded_ideals = [
+        loaded_media.short(nports=2),
+        loaded_media.open(nports=2),
+        loaded_media.match(nports=2),
+        loaded_media.thru(),
+    ]
+
+    fixed_ans = {
+        name: ansdata[name].interpolate(
+            loaded_freq, kind='linear', fill_value='extrapolate'
+        )
+        for name in (
+            'short_P1',
+            'open_P1',
+            'load_P1',
+            'short_P2',
+            'open_P2',
+            'load_P2',
+            'thru',
+        )
+    }
+    loaded_ans_ideals = [
+        two_port_reflect(fixed_ans['short_P1'].s11, fixed_ans['short_P2'].s22),
+        two_port_reflect(fixed_ans['open_P1'].s11, fixed_ans['open_P2'].s22),
+        two_port_reflect(fixed_ans['load_P1'].s11, fixed_ans['load_P2'].s22),
+        fixed_ans['thru'],
+    ]
+
+    measured_thru = loaded_caldata['thru']['ntwk']
+    short_meas_2p = two_port_reflect(
+        loaded_caldata['short']['ntwk'].s11,
+        loaded_caldata['short']['ntwk'].s11,
+    )
+    open_meas_2p = two_port_reflect(
+        loaded_caldata['open']['ntwk'].s11,
+        loaded_caldata['open']['ntwk'].s11,
+    )
+    load_meas_2p = two_port_reflect(
+        loaded_caldata['load']['ntwk'].s11,
+        loaded_caldata['load']['ntwk'].s11,
+    )
+    loaded_measured = [
+        short_meas_2p,
+        open_meas_2p,
+        load_meas_2p,
+        measured_thru,
+    ]
+
+    loaded_cal = SOLT(
+        ideals=loaded_ans_ideals,
+        measured=loaded_measured,
+        n_ports=2,
+    )
+    return (
+        loaded_caldata,
+        loaded_freq,
+        loaded_media,
+        loaded_ideals,
+        loaded_ans_ideals,
+        loaded_measured,
+        loaded_cal,
+    )
+
+
+def set_external_calibration_path(path: str) -> bool:
+    global calpath, caldata, freq, media, ideals, ans_ideals, measured, cal
+    global _cal_cache_key, _cal_cache
+
+    path = _ensure_calpath(path)
+    if path == calpath and _cal_cache is not None:
+        return True
+
+    try:
+        (
+            new_caldata,
+            new_freq,
+            new_media,
+            new_ideals,
+            new_ans_ideals,
+            new_measured,
+            new_cal,
+        ) = _load_external_calibration(path)
+    except Exception as exc:
+        logger.warning(
+            "Failed loading external calibration from %s: %s", path, exc
+        )
+        return False
+
+    calpath = path
+    caldata = new_caldata
+    freq = new_freq
+    media = new_media
+    ideals = new_ideals
+    ans_ideals = new_ans_ideals
+    measured = new_measured
+    cal = new_cal
+    _cal_cache_key = ()
+    _cal_cache = new_cal
+    logger.info("External calibration path: %s", calpath)
+    return True
+
+
+set_external_calibration_path(DEFAULT_EXTERNAL_CALPATH)
 
 
 def _frequency_key(frequency) -> tuple[int, ...]:
@@ -271,6 +378,123 @@ def _calibration_at_frequency(frequency):
 
 def apply_external_calibration(ntwk):
     return _calibration_at_frequency(ntwk.frequency).apply_cal(ntwk)
+
+
+def calculate_cal_shunt_z(
+    s11: list[Datapoint], s21: list[Datapoint]
+) -> list[Datapoint]:
+    z_data = []
+    for dp11, dp21 in zip(s11, s21):
+        numerator = 50 * (dp21.z + dp21.z)
+        denominator = (1 - dp11.z) * (1 - dp11.z) - dp21.z * dp21.z
+        try:
+            z = numerator / denominator
+        except ZeroDivisionError:
+            z = complex(float("inf"), float("inf"))
+        z_data.append(Datapoint(dp11.freq, z.real, z.imag))
+    return z_data
+
+
+def subtract_impedance(
+    z_data: list[Datapoint], offset_data: list[Datapoint]
+) -> list[Datapoint]:
+    corrected = []
+    for z_dp, offset_dp in zip(z_data, offset_data):
+        z = z_dp.z - offset_dp.z
+        corrected.append(Datapoint(z_dp.freq, z.real, z.imag))
+    return corrected
+
+
+def _admittance(z: complex) -> complex:
+    if not math.isfinite(z.real) or not math.isfinite(z.imag):
+        return 0j
+    try:
+        return 1 / z
+    except ZeroDivisionError:
+        return complex(float("inf"), float("inf"))
+
+
+def subtract_admittance(
+    z_data: list[Datapoint], offset_data: list[Datapoint]
+) -> list[Datapoint]:
+    corrected = []
+    for z_dp, offset_dp in zip(z_data, offset_data):
+        y = _admittance(z_dp.z) - _admittance(offset_dp.z)
+        try:
+            z = 1 / y
+        except ZeroDivisionError:
+            z = complex(float("inf"), float("inf"))
+        corrected.append(Datapoint(z_dp.freq, z.real, z.imag))
+    return corrected
+
+
+def calculate_socket_z(socket_name: str, frequency) -> list[Datapoint]:
+    socket_ntwk = caldata.get(socket_name, {}).get("ntwk")
+    if socket_ntwk is None:
+        return []
+    socket_at_frequency = _network_at_frequency(socket_ntwk, frequency)
+    socket_cal = apply_external_calibration(socket_at_frequency)
+    ts_socket = Touchstone()
+    ts_socket.from_skrf_network(socket_cal)
+    return calculate_cal_shunt_z(
+        ts_socket.s11[:],
+        ts_socket.s21[:],
+    )
+
+
+def calculate_socket_short_z(frequency) -> list[Datapoint]:
+    return calculate_socket_z(SOCKET_SHORT_NAME, frequency)
+
+
+def calculate_socket_open_z(frequency) -> list[Datapoint]:
+    return calculate_socket_z(SOCKET_OPEN_NAME, frequency)
+
+
+def calculate_socket_short_corrected_shunt_z(
+    cal_shunt_z: list[Datapoint], frequency
+) -> list[Datapoint]:
+    socket_short_z = calculate_socket_short_z(frequency)
+    if not socket_short_z:
+        return []
+    short_corrected = subtract_impedance(cal_shunt_z, socket_short_z)
+
+    socket_open_z = calculate_socket_open_z(frequency)
+    if not socket_open_z:
+        return short_corrected
+
+    socket_open_short_corrected = subtract_impedance(
+        socket_open_z, socket_short_z
+    )
+    return subtract_admittance(
+        short_corrected, socket_open_short_corrected
+    )
+
+
+def log_external_calibration_delta(
+    raw_s11: list[Datapoint],
+    raw_s21: list[Datapoint],
+    cal_s11: list[Datapoint],
+    cal_s21: list[Datapoint],
+) -> None:
+    if not raw_s11 or not raw_s21 or not cal_s11 or not cal_s21:
+        return
+    index = min(len(raw_s11), len(raw_s21), len(cal_s11), len(cal_s21)) // 2
+    raw11 = raw_s11[index].z
+    raw21 = raw_s21[index].z
+    cal11 = cal_s11[index].z
+    cal21 = cal_s21[index].z
+    logger.info(
+        "External SOLT applied at %d Hz: "
+        "S11 raw=%s cal=%s |delta|=%.6g, "
+        "S21 raw=%s cal=%s |delta|=%.6g",
+        cal_s11[index].freq,
+        raw11,
+        cal11,
+        abs(cal11 - raw11),
+        raw21,
+        cal21,
+        abs(cal21 - raw21),
+    )
 
 
 
@@ -388,6 +612,9 @@ class NanoVNASaver(QWidget):
         # TODO APP_SETTINGS should be used instead app.setting\
         self.settings: AppSettings = APP_SETTINGS
         app_config = self.settings.restore_config()
+        self.external_calibration_user_path = self.settings.value(
+            "ExternalSOLTPath", "", str
+        )
         self.threadpool = QtCore.QThreadPool()
         self.sweep = Sweep()
         self.worker = SweepWorker(self)
@@ -438,6 +665,8 @@ class NanoVNASaver(QWidget):
         self.ref_data: Touchstone = Touchstone()
         self.calibrated_s11 = []
         self.calibrated_s21 = []
+        self.cal_shunt_z = []
+        self.cal_shunt_z_short_corrected = []
 
         # Batch sweep state
         self._batch_active = False
@@ -450,6 +679,11 @@ class NanoVNASaver(QWidget):
         self._batch_recovery_failures = 0
         self._batch_watchdog_progress = -1.0
         self._batch_watchdog_changed_at = monotonic()
+        self._batch_schedule_generation = 0
+        self._batch_pending_action = None
+        self._batch_pending_action_due_at = 0.0
+        self._batch_reboot_reconnecting = False
+        self._batch_reboot_deadline = 0.0
         self._batch_watchdog = QtCore.QTimer(self)
         self._batch_watchdog.setInterval(BATCH_WATCHDOG_INTERVAL_MS)
         self._batch_watchdog.timeout.connect(self._batch_watchdog_tick)
@@ -536,6 +770,14 @@ class NanoVNASaver(QWidget):
                 "S11_db_phase": LogMagPhaseChart("Cal S11 db/phase"),
                 "S21_db_phase": LogMagPhaseChart("Cal S21 db/phase"),
                 "real_imag_shunt": RealImaginaryZShuntChart("Cal S21 R+jX shunt"),
+                "real_imag_shunt_formula": RealImaginaryZComputedChart(
+                    "Cal ShuntZ formula R+jX"
+                ),
+                "real_imag_shunt_formula_socket_short": (
+                    RealImaginaryZComputedChart(
+                        "Cal ShuntZ formula fixture-corrected R+jX"
+                    )
+                ),
             },
         }
         self.tdr_chart: TDRChart = TDRChart("TDR")
@@ -787,6 +1029,40 @@ class NanoVNASaver(QWidget):
             lambda: self.display_window("calibration")
         )
 
+        external_solt_box = QtWidgets.QGroupBox("External SOLT")
+        external_solt_layout = QtWidgets.QFormLayout(external_solt_box)
+        self.external_calibration_path_edit = QtWidgets.QLineEdit(calpath)
+        self.external_calibration_path_edit.setReadOnly(True)
+        self.external_calibration_path_edit.setMinimumHeight(20)
+        self.external_calibration_path_edit.setToolTip(calpath)
+
+        btn_external_solt_select = QtWidgets.QPushButton("Select ...")
+        btn_external_solt_select.setMinimumHeight(20)
+        btn_external_solt_select.clicked.connect(
+            self.select_external_calibration_path
+        )
+        btn_external_solt_auto = QtWidgets.QPushButton("Auto")
+        btn_external_solt_auto.setMinimumHeight(20)
+        btn_external_solt_auto.clicked.connect(
+            self.reset_external_calibration_path_auto
+        )
+        external_solt_buttons = QtWidgets.QHBoxLayout()
+        external_solt_buttons.addWidget(btn_external_solt_select)
+        external_solt_buttons.addWidget(btn_external_solt_auto)
+
+        external_solt_layout.addRow("Folder:", self.external_calibration_path_edit)
+        external_solt_layout.addRow(external_solt_buttons)
+        left_column.addWidget(external_solt_box)
+        if self.external_calibration_user_path:
+            self._set_external_calibration_path(
+                self.external_calibration_user_path,
+                save_user_path=False,
+                show_error=False,
+                refresh=False,
+            )
+        else:
+            self._update_external_calibration_path_display()
+
         ###############################################################
         #  Display setup
         ###############################################################
@@ -860,6 +1136,9 @@ class NanoVNASaver(QWidget):
                 return
             # 1) アプリ側 sweep を丸ごと復元（segments / averaging / log sweep など含む）
             self.sweep = self._sweep_snapshot.copy()
+            self._select_external_calibration_for_connected_vna()
+            self._apply_vna6000_defaults()
+            self._prefer_segment_log_sweep_for_vna6000()
 
             # 2) デバイス側に周波数レンジだけは必ず再適用（points設定APIは無いので不要）
             self.vna.resetSweep(int(self.sweep.start), int(self.sweep.end))
@@ -877,6 +1156,137 @@ class NanoVNASaver(QWidget):
 
         except Exception as e:
             logger.warning("Failed to restore sweep after connect: %s", e)
+
+    def _connected_vna_is_vna6000(self) -> bool:
+        board_revision = getattr(self.vna, "board_revision", None)
+        return str(board_revision) == "2.0.51"
+
+    def _default_external_calibration_path_for_connected_vna(self) -> str:
+        return (
+            VNA6000_EXTERNAL_CALPATH
+            if self._connected_vna_is_vna6000()
+            else DEFAULT_EXTERNAL_CALPATH
+        )
+
+    def _update_external_calibration_path_display(self) -> None:
+        edit = getattr(self, "external_calibration_path_edit", None)
+        if edit is None:
+            return
+        mode = "Manual" if self.external_calibration_user_path else "Auto"
+        text = f"{mode}: {calpath}"
+        edit.setText(text)
+        edit.setToolTip(text)
+
+    def _set_external_calibration_path(
+        self,
+        path: str,
+        *,
+        save_user_path: bool,
+        show_error: bool = True,
+        refresh: bool = True,
+    ) -> bool:
+        if not path:
+            return False
+        if not set_external_calibration_path(path):
+            if show_error:
+                self.showError(
+                    "Failed loading external SOLT calibration folder.\n\n"
+                    "Required files: S_short.s2p, S_open.s2p, "
+                    "S_load.s2p, S_thru.s2p"
+                )
+            self._update_external_calibration_path_display()
+            return False
+
+        if save_user_path:
+            self.external_calibration_user_path = _ensure_calpath(path)
+            self.settings.setValue(
+                "ExternalSOLTPath", self.external_calibration_user_path
+            )
+            self.settings.sync()
+
+        self._update_external_calibration_path_display()
+        if refresh and self.data.s11:
+            self.dataUpdated()
+        return True
+
+    def select_external_calibration_path(self) -> None:
+        start_dir = self.external_calibration_user_path or calpath
+        path = get_existing_directory(
+            self,
+            "Select external SOLT calibration folder",
+            start_dir,
+        )
+        if not path:
+            return
+        self._set_external_calibration_path(path, save_user_path=True)
+
+    def reset_external_calibration_path_auto(self) -> None:
+        self.external_calibration_user_path = ""
+        self.settings.remove("ExternalSOLTPath")
+        self.settings.sync()
+        self._set_external_calibration_path(
+            self._default_external_calibration_path_for_connected_vna(),
+            save_user_path=False,
+        )
+
+    def _select_external_calibration_for_connected_vna(self) -> None:
+        path = (
+            self.external_calibration_user_path
+            or self._default_external_calibration_path_for_connected_vna()
+        )
+        if not set_external_calibration_path(path):
+            logger.warning("Keeping previous external calibration path: %s", calpath)
+        self._update_external_calibration_path_display()
+
+    def _apply_vna6000_defaults(self) -> None:
+        if not self._connected_vna_is_vna6000():
+            return
+
+        logger.info(
+            "VNA6000 detected; using 201 datapoints and 10 averages"
+        )
+        self.vna.datapoints = 201
+        self.sweep.set_points(201)
+        self.sweep.set_averages(10, 0)
+
+        with contextlib.suppress(Exception):
+            self.sweep_control.update_step_size()
+
+        device_settings = self.windows.get("device_settings")
+        with contextlib.suppress(Exception):
+            device_settings.updateFields()
+
+        sweep_settings = self.windows.get("sweep_settings")
+        for attr, value in (
+            ("averages_input", "10"),
+            ("truncates_input", "0"),
+        ):
+            widget = getattr(sweep_settings, attr, None)
+            if widget is not None:
+                widget.setText(value)
+
+    def _prefer_segment_log_sweep_for_vna6000(self) -> None:
+        if not self._connected_vna_is_vna6000():
+            return
+
+        logger.info(
+            "VNA6000 detected; using segmented logarithmic sweep "
+            "instead of single-point log-spaced measurement"
+        )
+        self.sweep.set_logarithmic_measurement(False)
+        self.sweep.set_logarithmic(True)
+
+        sweep_settings = self.windows.get("sweep_settings")
+        for attr, checked in (
+            ("checkbox_logarithmic_measurement", False),
+            ("checkbox_logarithmic", True),
+        ):
+            checkbox = getattr(sweep_settings, attr, None)
+            if checkbox is None:
+                continue
+            checkbox.blockSignals(True)
+            checkbox.setChecked(checked)
+            checkbox.blockSignals(False)
 
     def auto_connect(
         self,
@@ -935,7 +1345,11 @@ class NanoVNASaver(QWidget):
             marker.findLocation(self.data.s11)
             marker.resetLabels()
             marker.updateLabels(
-                self.data.s11, self.data.s21, self.calibrated_s21
+                self.data.s11,
+                self.data.s21,
+                self.calibrated_s21,
+                self.cal_shunt_z,
+                self.cal_shunt_z_short_corrected,
             )
             for c in self.subscribing_charts:
                 c.update()
@@ -971,16 +1385,42 @@ class NanoVNASaver(QWidget):
         with self.dataLock:
             s11 = self.data.s11[:]
             s21 = self.data.s21[:]
-            ntwk = self.data.to_skrf_network()
-            ntwk = make_full_thru_network(ntwk)
-            ntwk = average_duplicate_freq(ntwk)
-            data_cal = apply_external_calibration(ntwk)
-            tscal = Touchstone()   
-            tscal.from_skrf_network(data_cal)
-            s11_cal = tscal.s11[:]
-            s21_cal = tscal.s21[:]
+            s11_cal = []
+            s21_cal = []
+            cal_shunt_z = []
+            cal_shunt_z_short_corrected = []
+            if s11:
+                try:
+                    ntwk = self.data.to_skrf_network()
+                    ntwk = make_full_thru_network(ntwk)
+                    ntwk = average_duplicate_freq(ntwk)
+                    data_cal = apply_external_calibration(ntwk)
+                    tscal = Touchstone()
+                    tscal.from_skrf_network(data_cal)
+                    s11_cal = tscal.s11[:]
+                    s21_cal = tscal.s21[:]
+                    log_external_calibration_delta(
+                        s11, s21, s11_cal, s21_cal
+                    )
+                    cal_shunt_z = calculate_cal_shunt_z(s11_cal, s21_cal)
+                    cal_shunt_z_short_corrected = (
+                        calculate_socket_short_corrected_shunt_z(
+                            cal_shunt_z,
+                            data_cal.frequency,
+                        )
+                    )
+                except Exception as exc:
+                    logger.warning("External calibration skipped: %s", exc)
             self.calibrated_s11 = s11_cal
             self.calibrated_s21 = s21_cal
+            self.cal_shunt_z = cal_shunt_z
+            self.cal_shunt_z_short_corrected = cal_shunt_z_short_corrected
+            logger.debug(
+                "Calibration chart data lengths: raw=%d cal_s11=%d cal_s21=%d",
+                len(s11),
+                len(s11_cal),
+                len(s21_cal),
+            )
             # print(ntwk.s[:,1,0],s21_cal[0])
             
 
@@ -988,7 +1428,13 @@ class NanoVNASaver(QWidget):
 
         for m in self.markers:
             m.resetLabels()
-            m.updateLabels(s11, s21, s21_cal)
+            m.updateLabels(
+                s11,
+                s21,
+                s21_cal,
+                cal_shunt_z,
+                cal_shunt_z_short_corrected,
+            )
 
         for c in self.s11charts:
             c.setData(s11)
@@ -1006,6 +1452,8 @@ class NanoVNASaver(QWidget):
         self.calibrationCharts[0].setData(s11_cal)#'S11_db_phase'
         self.calibrationCharts[1].setData(s21_cal)#S21_db_phase
         self.calibrationCharts[2].setData(s21_cal)#real_imag_shunt
+        self.calibrationCharts[3].setData(cal_shunt_z)#real_imag_shunt_formula
+        self.calibrationCharts[4].setData(cal_shunt_z_short_corrected)
 
         self.sweep_control.progress_bar.setValue(int(worker_progress))
         self.windows["tdr"].updateTDR()
@@ -1069,18 +1517,38 @@ class NanoVNASaver(QWidget):
             marker.frequencyInput.textEdited.emit(marker.frequencyInput.text())
 
     def setReference(self, s11=None, s21=None, source=None):
+        s11_cal = []
+        s21_cal = []
+        cal_shunt_z = []
+        cal_shunt_z_short_corrected = []
         if not s11:
             with self.dataLock:
                 s11 = self.data.s11[:]
                 s21 = self.data.s21[:]
-                ntwk = self.data.to_skrf_network()
-                ntwk = make_full_thru_network(ntwk)
-                ntwk = average_duplicate_freq(ntwk)
-                data_cal = apply_external_calibration(ntwk)
-                tscal = Touchstone()   
-                tscal.from_skrf_network(data_cal)
-                s11_cal = tscal.s11[:]
-                s21_cal = tscal.s21[:]
+                if s11:
+                    try:
+                        ntwk = self.data.to_skrf_network()
+                        ntwk = make_full_thru_network(ntwk)
+                        ntwk = average_duplicate_freq(ntwk)
+                        data_cal = apply_external_calibration(ntwk)
+                        tscal = Touchstone()
+                        tscal.from_skrf_network(data_cal)
+                        s11_cal = tscal.s11[:]
+                        s21_cal = tscal.s21[:]
+                        log_external_calibration_delta(
+                            s11, s21, s11_cal, s21_cal
+                        )
+                        cal_shunt_z = calculate_cal_shunt_z(s11_cal, s21_cal)
+                        cal_shunt_z_short_corrected = (
+                            calculate_socket_short_corrected_shunt_z(
+                                cal_shunt_z,
+                                data_cal.frequency,
+                            )
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "External reference calibration skipped: %s", exc
+                        )
 
         self.ref_data.s11 = s11
         for c in self.s11charts:
@@ -1097,6 +1565,8 @@ class NanoVNASaver(QWidget):
         self.calibrationCharts[0].setReference(s11_cal)#'S11_db_phase'
         self.calibrationCharts[1].setReference(s21_cal)#S21_db_phase
         self.calibrationCharts[2].setReference(s21_cal)#real_imag_shunt
+        self.calibrationCharts[3].setReference(cal_shunt_z)#real_imag_shunt_formula
+        self.calibrationCharts[4].setReference(cal_shunt_z_short_corrected)
 
         self.btnResetReference.setDisabled(False)
 
@@ -1211,6 +1681,7 @@ class NanoVNASaver(QWidget):
         attempts_left: int,
         on_connected=None,
         on_failed=None,
+        reconnect_serial: str | None = None,
     ) -> None:
         if self.vna and self.vna.connected():
             if on_connected:
@@ -1220,7 +1691,11 @@ class NanoVNASaver(QWidget):
         try:
             self.serial_control.rescanSerialPort()
             selected = False
-            if reconnect_port:
+            if reconnect_serial:
+                selected = self.serial_control.select_serial_number(
+                    reconnect_serial
+                )
+            if not selected and reconnect_port:
                 selected = self.serial_control.select_port(reconnect_port)
             if not selected and self.serial_control.inp_port.count() == 1:
                 self.serial_control.inp_port.setCurrentIndex(0)
@@ -1253,6 +1728,7 @@ class NanoVNASaver(QWidget):
                 attempts_left,
                 on_connected=on_connected,
                 on_failed=on_failed,
+                reconnect_serial=reconnect_serial,
             ),
         )
 
@@ -1271,22 +1747,11 @@ class NanoVNASaver(QWidget):
             self._batch_last_sweep_failed = True
             self._batch_last_error_message = msg
 
-            if self._is_fatal_batch_communication_error(msg):
-                message = (
-                    "Fatal VNA communication error during batch sweep "
-                    f"{self._batch_index}: {msg}. "
-                    "Stopping batch; power-cycle the VNA."
-                )
-                logger.error(message)
-                self._batch_log_error(self._batch_index, message)
-                self._stop_batch_after_unrecoverable_vna_failure()
-                self.sweepFinished()
-                return
-
             self._recover_vna_after_failed_batch_sweep()
-
-            self.sweepFinished()
-            self._on_sweep_finished_for_batch()
+            # SweepWorker emits ``finished`` immediately after ``sweep_error``.
+            # The finished signal is already connected to sweepFinished() and
+            # _on_sweep_finished_for_batch(), so invoking them here would run
+            # batch completion twice and schedule two subsequent sweeps.
             return
 
         # 通常 sweep は従来通り
@@ -1295,13 +1760,6 @@ class NanoVNASaver(QWidget):
             self.vna.flushSerialBuffers()
             self.vna.reconnect()
         self.sweepFinished()
-
-    @staticmethod
-    def _is_fatal_batch_communication_error(message: str) -> bool:
-        return any(
-            text in message
-            for text in BATCH_FATAL_COMMUNICATION_ERRORS
-        )
 
     def popoutChart(self, chart: Chart):
         logger.debug("Requested popout for chart: %s", chart.name)
@@ -1395,6 +1853,8 @@ class NanoVNASaver(QWidget):
         self._batch_last_connection_refresh_at = monotonic()
         self._batch_needs_recovery_cooldown = False
         self._batch_recovery_failures = 0
+        self._batch_cancel_pending_action()
+        self._batch_reboot_reconnecting = False
 
         self.btn_batch_start.setDisabled(True)
         self.btn_batch_stop.setDisabled(False)
@@ -1404,6 +1864,8 @@ class NanoVNASaver(QWidget):
 
     def batch_stop(self):
         self._batch_active = False
+        self._batch_cancel_pending_action()
+        self._batch_reboot_reconnecting = False
         self._batch_watchdog.stop()
         self.btn_batch_stop.setDisabled(True)
         self.btn_batch_start.setDisabled(False)
@@ -1417,6 +1879,7 @@ class NanoVNASaver(QWidget):
         if self._batch_index >= self._batch_cfg.count:
             # done
             self._batch_active = False
+            self._batch_cancel_pending_action()
             self._batch_watchdog.stop()
             self.btn_batch_stop.setDisabled(True)
             self.btn_batch_start.setDisabled(False)
@@ -1425,11 +1888,62 @@ class NanoVNASaver(QWidget):
         self._batch_index += 1
         self.sweep_start()
 
+    def _batch_cancel_pending_action(self) -> None:
+        self._batch_schedule_generation += 1
+        self._batch_pending_action = None
+        self._batch_pending_action_due_at = 0.0
+
+    def _schedule_batch_action(self, delay_ms: int, action) -> None:
+        """Schedule one tracked batch action, replacing any older action."""
+        self._batch_schedule_generation += 1
+        generation = self._batch_schedule_generation
+        self._batch_pending_action = action
+        self._batch_pending_action_due_at = monotonic() + delay_ms / 1000
+        QtCore.QTimer.singleShot(
+            delay_ms,
+            lambda: self._run_scheduled_batch_action(generation),
+        )
+
+    def _run_scheduled_batch_action(self, generation: int) -> None:
+        if generation != self._batch_schedule_generation:
+            return
+        action = self._batch_pending_action
+        self._batch_pending_action = None
+        self._batch_pending_action_due_at = 0.0
+        if self._batch_active and action is not None:
+            action()
+
     def _batch_watchdog_tick(self):
         if not self._batch_active or not self._batch_cfg:
             self._batch_watchdog.stop()
             return
         if not self.worker.isRunning():
+            if self._batch_reboot_reconnecting:
+                if monotonic() <= self._batch_reboot_deadline:
+                    return
+                message = "scheduled NanoVNA reconnect did not complete"
+                logger.error(message)
+                self._batch_log_error(self._batch_index, message)
+                self._stop_batch_after_unrecoverable_vna_failure()
+                return
+
+            action = self._batch_pending_action
+            if action is None:
+                message = "batch has no running worker or scheduled action"
+                logger.error(message)
+                self._batch_log_error(self._batch_index, message)
+                self._stop_batch_after_unrecoverable_vna_failure()
+                return
+
+            overdue_s = monotonic() - self._batch_pending_action_due_at
+            if overdue_s <= BATCH_SCHEDULE_GRACE_S:
+                return
+
+            logger.warning(
+                "Batch action is %.0fs overdue; running it now", overdue_s
+            )
+            generation = self._batch_schedule_generation
+            self._run_scheduled_batch_action(generation)
             return
 
         stalled_s = monotonic() - self._batch_watchdog_changed_at
@@ -1521,6 +2035,8 @@ class NanoVNASaver(QWidget):
                         self._batch_index, f"save failed: {exc}"
                     )
         finally:
+            if self._batch_reboot_reconnecting:
+                return
             if self._batch_active and self._batch_cfg:
                 self._refresh_vna_connection_between_batch_sweeps()
             if self._batch_active and self._batch_cfg:
@@ -1533,7 +2049,7 @@ class NanoVNASaver(QWidget):
                     self._reboot_vna_for_batch(rest_ms)
                     return
 
-                QtCore.QTimer.singleShot(rest_ms, self._batch_start_next)
+                self._schedule_batch_action(rest_ms, self._batch_start_next)
 
     def _batch_should_reboot_before_next_sweep(self) -> bool:
         if not self._batch_active or not self._batch_cfg:
@@ -1556,16 +2072,23 @@ class NanoVNASaver(QWidget):
             logger.warning(message)
             self._batch_log_error(self._batch_index, message)
             self._record_vna_recovery_failure(exc)
+            if self._batch_active:
+                self._schedule_batch_action(
+                    BATCH_ERROR_RECOVERY_COOLDOWN_MS,
+                    lambda: self._reboot_vna_for_batch(rest_ms),
+                )
             return
 
         def continue_batch() -> None:
+            self._batch_reboot_reconnecting = False
             if not self._batch_active:
                 return
             self._batch_last_connection_refresh_at = monotonic()
             self._batch_recovery_failures = 0
-            QtCore.QTimer.singleShot(rest_ms, self._batch_start_next)
+            self._schedule_batch_action(rest_ms, self._batch_start_next)
 
         def stop_batch() -> None:
+            self._batch_reboot_reconnecting = False
             message = (
                 "automatic reconnect after scheduled NanoVNA reboot timed out; "
                 "stopping batch"
@@ -1574,6 +2097,13 @@ class NanoVNASaver(QWidget):
             self._batch_log_error(self._batch_index, message)
             self._stop_batch_after_unrecoverable_vna_failure()
 
+        self._batch_reboot_reconnecting = True
+        reconnect_window_s = (
+            REBOOT_RECONNECT_INTERVAL_MS * REBOOT_RECONNECT_ATTEMPTS / 1000
+        )
+        self._batch_reboot_deadline = (
+            monotonic() + reconnect_window_s + BATCH_SCHEDULE_GRACE_S
+        )
         QtCore.QTimer.singleShot(
             REBOOT_RECONNECT_INTERVAL_MS,
             lambda: self._auto_reconnect_after_reboot(
@@ -1608,7 +2138,77 @@ class NanoVNASaver(QWidget):
                 self._batch_index,
                 f"recovery failed: {exc}",
             )
+            if "write failed" in str(exc).lower():
+                self._start_batch_usb_reset_recovery(exc, bandwidth)
+                return
             self._record_vna_recovery_failure(exc)
+
+    def _start_batch_usb_reset_recovery(
+        self, exc: Exception, bandwidth
+    ) -> None:
+        """Reset USB after serial recovery fails with a write timeout."""
+        serial_port = getattr(self.vna, "serial", None)
+        reconnect_port = getattr(serial_port, "port", None)
+        reconnect_serial = getattr(serial_port, "usb_serial_number", None)
+
+        with contextlib.suppress(Exception):
+            if hasattr(serial_port, "cancel_read"):
+                serial_port.cancel_read()
+            if hasattr(serial_port, "cancel_write"):
+                serial_port.cancel_write()
+            serial_port.close()
+        self.serial_control.mark_disconnected()
+
+        if not _reset_usb_device_for_serial(reconnect_port):
+            message = f"USB reset recovery failed after: {exc}"
+            logger.error(message)
+            self._batch_log_error(self._batch_index, message)
+            self._record_vna_recovery_failure(exc)
+            return
+
+        logger.warning(
+            "USB reset recovery started for batch sweep %d",
+            self._batch_index,
+        )
+        self._batch_reboot_reconnecting = True
+        reconnect_window_s = (
+            REBOOT_RECONNECT_INTERVAL_MS * REBOOT_RECONNECT_ATTEMPTS / 1000
+        )
+        self._batch_reboot_deadline = (
+            monotonic() + reconnect_window_s + BATCH_SCHEDULE_GRACE_S
+        )
+
+        def continue_batch() -> None:
+            self._batch_reboot_reconnecting = False
+            if not self._batch_active:
+                return
+            if bandwidth is not None and "Bandwidth" in self.vna.features:
+                with contextlib.suppress(Exception):
+                    self.vna.set_bandwidth(bandwidth)
+            self._batch_last_connection_refresh_at = monotonic()
+            self._batch_recovery_failures = 0
+            self._schedule_batch_action(
+                BATCH_ERROR_RECOVERY_COOLDOWN_MS,
+                self._batch_start_next,
+            )
+
+        def stop_batch() -> None:
+            self._batch_reboot_reconnecting = False
+            message = "automatic reconnect after USB reset timed out"
+            logger.error(message)
+            self._batch_log_error(self._batch_index, message)
+            self._stop_batch_after_unrecoverable_vna_failure()
+
+        QtCore.QTimer.singleShot(
+            3000,
+            lambda: self._auto_reconnect_after_reboot(
+                reconnect_port,
+                REBOOT_RECONNECT_ATTEMPTS,
+                on_connected=continue_batch,
+                on_failed=stop_batch,
+                reconnect_serial=reconnect_serial,
+            ),
+        )
 
     def _refresh_vna_connection_between_batch_sweeps(self) -> None:
         if not self.vna.connected():
@@ -1652,7 +2252,7 @@ class NanoVNASaver(QWidget):
         message = (
             "VNA communication is not recovering "
             f"after {self._batch_recovery_failures} attempts: {exc}. "
-            "Stopping batch; power-cycle the VNA."
+            "Stopping batch; check or power-cycle the VNA."
         )
         logger.error(message)
         self._batch_log_error(self._batch_index, message)
@@ -1660,6 +2260,8 @@ class NanoVNASaver(QWidget):
 
     def _stop_batch_after_unrecoverable_vna_failure(self) -> None:
         self._batch_active = False
+        self._batch_cancel_pending_action()
+        self._batch_reboot_reconnecting = False
         self._batch_watchdog.stop()
         self.btn_batch_stop.setDisabled(True)
         self.btn_batch_start.setDisabled(False)
@@ -1709,7 +2311,11 @@ class NanoVNASaver(QWidget):
         # Field order is consistent with Touchstone.FIELD_ORDER ("11","21","12","22") :contentReference[oaicite:5]{index=5}
         with open(path, "w", encoding="utf-8") as f:
             f.write("# HZ S RI R 50\n")
+            previous_freq = None
             for i, dp11 in enumerate(s11):
+                if dp11.freq == previous_freq:
+                    continue
+                previous_freq = dp11.freq
                 dp21 = s21[i] if i < len(s21) else Datapoint(dp11.freq, 0.0, 0.0)
                 # S12, S22 = 0
                 f.write(

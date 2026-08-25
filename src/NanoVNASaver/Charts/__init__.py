@@ -17,6 +17,7 @@ from .QFactor import QualityFactorChart
 from .RI import RealImaginaryChart
 from .RIMu import RealImaginaryMuChart
 from .RIZ import RealImaginaryZChart
+from .RIZComputed import RealImaginaryZComputedChart
 from .RIZSeries import RealImaginaryZSeriesChart
 from .RIZShunt import RealImaginaryZShuntChart
 from .Smith import SmithChart
@@ -45,6 +46,7 @@ __all__ = [
     "RealImaginaryChart",
     "RealImaginaryMuChart",
     "RealImaginaryZChart",
+    "RealImaginaryZComputedChart",
     "RealImaginaryZSeriesChart",
     "RealImaginaryZShuntChart",
     "SParameterChart",

@@ -43,6 +43,8 @@ from ..Formatting import (
     parse_frequency,
 )
 from .Values import (
+    CAL_SHUNT_Z_FORMULA_LABEL,
+    CAL_SHUNT_Z_FORMULA_SHORT_LABEL,
     CAL_S21_REAL_IMAG_SHUNT_LABEL,
     TYPES,
     Value,
@@ -121,6 +123,19 @@ class Marker(QtCore.QObject, Value):
                     active_labels.append(CAL_S21_REAL_IMAG_SHUNT_LABEL)
                     self.qsettings.setValue("MarkerFields", active_labels)
                 self.qsettings.setValue("MarkerFieldsCalS21Migrated", True)
+            if not self.qsettings.value(
+                "MarkerFieldsCalShuntZFormulaMigrated", False, bool
+            ):
+                for label_id in (
+                    CAL_SHUNT_Z_FORMULA_LABEL,
+                    CAL_SHUNT_Z_FORMULA_SHORT_LABEL,
+                ):
+                    if label_id not in active_labels:
+                        active_labels.append(label_id)
+                self.qsettings.setValue("MarkerFields", active_labels)
+                self.qsettings.setValue(
+                    "MarkerFieldsCalShuntZFormulaMigrated", True
+                )
             Marker.active_labels = active_labels
             self.index = Marker._instances
 
@@ -346,6 +361,8 @@ class Marker(QtCore.QObject, Value):
         s11: list[RFTools.Datapoint],
         s21: list[RFTools.Datapoint],
         s21_cal: list[RFTools.Datapoint] | None = None,
+        cal_shunt_z: list[RFTools.Datapoint] | None = None,
+        cal_shunt_z_short: list[RFTools.Datapoint] | None = None,
     ):
         if not s11:
             return
@@ -446,3 +463,21 @@ class Marker(QtCore.QObject, Value):
             )
         else:
             self.label["cals21realimagshunt"].setText("")
+
+        _cal_shunt_z = self._nearest_datapoint(cal_shunt_z or [], _s11.freq)
+        if _cal_shunt_z is not None:
+            self.label[CAL_SHUNT_Z_FORMULA_LABEL].setText(
+                format_complex_imp(_cal_shunt_z.z, allow_negative=True)
+            )
+        else:
+            self.label[CAL_SHUNT_Z_FORMULA_LABEL].setText("")
+
+        _cal_shunt_z_short = self._nearest_datapoint(
+            cal_shunt_z_short or [], _s11.freq
+        )
+        if _cal_shunt_z_short is not None:
+            self.label[CAL_SHUNT_Z_FORMULA_SHORT_LABEL].setText(
+                format_complex_imp(_cal_shunt_z_short.z, allow_negative=True)
+            )
+        else:
+            self.label[CAL_SHUNT_Z_FORMULA_SHORT_LABEL].setText("")

@@ -192,22 +192,26 @@ class SweepSettingsWindow(QtWidgets.QWidget):
         label.setWordWrap(True)
         label.setMinimumHeight(50)
         layout.addRow(label)
-        averages = QtWidgets.QLineEdit(
+        self.averages_input = QtWidgets.QLineEdit(
             str(self.app.sweep.properties.averages[0])
         )
-        averages.setMinimumHeight(20)
-        truncates = QtWidgets.QLineEdit(
+        self.averages_input.setMinimumHeight(20)
+        self.truncates_input = QtWidgets.QLineEdit(
             str(self.app.sweep.properties.averages[1])
         )
-        truncates.setMinimumHeight(20)
-        averages.editingFinished.connect(
-            lambda: self.update_averaging(averages, truncates)
+        self.truncates_input.setMinimumHeight(20)
+        self.averages_input.editingFinished.connect(
+            lambda: self.update_averaging(
+                self.averages_input, self.truncates_input
+            )
         )
-        truncates.editingFinished.connect(
-            lambda: self.update_averaging(averages, truncates)
+        self.truncates_input.editingFinished.connect(
+            lambda: self.update_averaging(
+                self.averages_input, self.truncates_input
+            )
         )
-        layout.addRow("Number of measurements to average", averages)
-        layout.addRow("Number to discard", truncates)
+        layout.addRow("Number of measurements to average", self.averages_input)
+        layout.addRow("Number to discard", self.truncates_input)
 
         # TODO: is this more a device than a sweep property?
         label = QtWidgets.QLabel(
