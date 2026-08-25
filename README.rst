@@ -87,6 +87,16 @@ Main development is currently done on Linux (Debian 11)
 Installation
 ------------
 
+Raspberry Pi OS migration
+^^^^^^^^^^^^^^^^^^^^^^^^^
+
+This fork contains local NanoVNASaver customizations preserved for migration
+from Ubuntu to Raspberry Pi OS.  Clone the ``raspi-os-migration-20260825``
+branch, then follow the Japanese migration guide below.  The guide includes a
+ready-to-paste handoff prompt for Codex on the destination machine.
+
+`Raspberry Pi OS / Codex migration guide <docs/RASPIOS_MIGRATION_JA.md>`_
+
 Binary releases
 ^^^^^^^^^^^^^^^
 
@@ -241,4 +251,3 @@ below:
 .. image:: https://www.paypalobjects.com/en_US/i/btn/btn_donate_LG.gif
    :target: https://www.paypal.com/cgi-bin/webscr?cmd=_donations&business=T8KTGVDQF5K6E&item_name=NanoVNASaver+Development&currency_code=EUR&source=url
    :alt: Paypal
-
