@@ -175,7 +175,11 @@ SOCKET_OPEN_NAME = "socket_open"
 kVNApath = '/home/keisuke/Documents/Spara/caldata/20260407_30k-9G_IF100Hz_-10dBm_801pt_ave10_150mm/'
 ansdata = {}
 for i in ['short_P1', 'open_P1', 'load_P1', 'short_P2', 'open_P2', 'load_P2', 'thru']:
-    ansdata[i] = rf.Network(f'{kVNApath}S_{i}.s2p')
+    answer_path = Path(kVNApath) / f"S_{i}.s2p"
+    if answer_path.exists():
+        ansdata[i] = rf.Network(str(answer_path))
+    else:
+        logger.warning("Calibration answer file not found: %s", answer_path)
 
 calpath = ""
 caldata = {}
@@ -1129,7 +1133,13 @@ class NanoVNASaver(QWidget):
             height = min(default.height(), max_height)
         return width, height
 
-    def _restore_all_sweep_after_connect(self):
+    def _restore_all_sweep_after_connect(self, was_connected: bool = True):
+        # SerialControl.connected is emitted for both connection state changes.
+        # A disconnect closes the serial port before emitting False, so there is
+        # no sweep state to restore in that case.
+        if not was_connected:
+            return
+
         try:
             if not self.vna or not hasattr(self.vna, "serial") or not self.vna.serial or not self.vna.serial.is_open:
                 logger.warning("Skip restoring sweep: serial not open yet")

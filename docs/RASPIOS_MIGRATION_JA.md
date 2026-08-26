@@ -76,3 +76,27 @@ NanoVNASaverです。移行用ブランチ raspi-os-migration-20260825 の内容
 - 測定データ、校正データ、ユーザー設定など、Git管理外のデータはこの
   リポジトリには含まれません。Ubuntuを消去する前に別途バックアップして
   ください。
+
+## Raspberry Pi OS 13 (trixie) / 64-bitでのセットアップ実績
+
+2026-08-25に、aarch64のRaspberry Pi OS（Debian 13、Python 3.13.5、
+Wayland/labwc）で次の手順を確認しました。システムPythonは既存の
+移行用ブランチ取得時の`uv.lock`の`<3.13`条件と合わないため、uv管理の
+Python 3.12を使用します。
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | \
+  env UV_UNMANAGED_INSTALL="$HOME/.local/bin" sh
+"$HOME/.local/bin/uv" python install 3.12
+"$HOME/.local/bin/uv" sync --frozen --python 3.12
+```
+
+この構成ではaarch64用PySide6、NumPy、SciPy wheelを利用でき、aptによる
+ビルド依存の追加は不要でした。カスタム機能が使用するscikit-rfも通常依存に
+含める必要があります。
+
+USB接続前はudevルールを配置しません。接続後に`lsusb`とシリアルポートを
+確認し、Vendor ID/Product IDが`0483:5740`と一致する場合だけ
+`contrib/99-nanovna-usb-reset.rules`の導入を検討してください。また、実行
+ユーザーが`dialout`グループに所属していない場合は管理者による追加と、
+ログアウト・ログインが必要です。
