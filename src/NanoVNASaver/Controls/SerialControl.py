@@ -144,17 +144,20 @@ class SerialControl(Control):
             "SerialInputValidation", False, bool
         )
 
-        # connected
         self.btn_toggle.setText("Disconnect")
         self.btn_toggle.repaint()
-
-        self.connected.emit(True)
 
         try:
             frequencies = self.app.vna.read_frequencies()
         except Exception as exc:
             logger.warning("No frequencies read: %s", exc)
+            self._abort_connect("No frequencies read from VNA")
             return
+
+        if not frequencies:
+            self._abort_connect("Empty frequency list received from VNA")
+            return
+
         logger.info(
             "Read starting frequency %s and end frequency %s",
             frequencies[0],
@@ -176,10 +179,21 @@ class SerialControl(Control):
         self.app.sweep_control.update_step_size()
 
         self.app.windows["sweep_settings"].vna_connected()
+        self.connected.emit(True)
 
 
         # logger.debug("Starting initial sweep")
         # self.app.sweep_start()
+
+    def _abort_connect(self, reason: str) -> None:
+        logger.warning("Aborting connect: %s", reason)
+        with contextlib.suppress(Exception):
+            self.app.vna.disconnect()
+        with contextlib.suppress(Exception):
+            self.interface.close()
+        self.btn_toggle.setText("Connect to device")
+        self.btn_toggle.repaint()
+        self.connected.emit(False)
 
     def disconnect_device(self):
         with self.interface.lock:

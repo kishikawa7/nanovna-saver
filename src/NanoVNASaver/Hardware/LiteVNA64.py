@@ -88,6 +88,7 @@ class ScreenshotData:
 
 class LiteVNA64(NanoVNA_V2):
     name = "LiteVNA-64"
+    prime_first_logarithmic_point = True
     valid_datapoints: tuple[int, ...] = (
         51,
         101,
@@ -206,17 +207,18 @@ class LiteVNA64(NanoVNA_V2):
         self._exit_usb_mode()
         super().disconnect()
 
+    def power_reset(self) -> None:
+        """Leave USB data mode for the scheduled batch refresh."""
+        if not self.connected():
+            raise IOError("VNA is not connected")
+        self._exit_usb_mode()
+
     def _exit_usb_mode(self) -> None:
         with self.serial.lock:
             self.serial.write(
                 pack("<BBB", _CMD_WRITE, _ADDR_RAW_SAMPLES_MODE, 2)
             )
             sleep(WRITE_SLEEP)
-
-    def readValues(self, value) -> list[complex]:
-        result = super().readValues(value)
-        self._exit_usb_mode()
-        return result
 
     def setSweep(self, start, stop):
         # Device loose these value after going to idle mode

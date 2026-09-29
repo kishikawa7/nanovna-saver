@@ -41,6 +41,7 @@ class Properties(NamedTuple):
     logarithmic_measurement: bool = True
     logarithmic_points_per_decade: int = 20
     logarithmic_points_per_scan: int = 1
+    f_v2_safe_logarithmic: bool = False
 
 
 class Sweep:
@@ -178,6 +179,12 @@ class Sweep:
         with self._lock:
             self._properties = self.properties._replace(
                 logarithmic_points_per_scan=max(1, points)
+            )
+
+    def set_f_v2_safe_logarithmic(self, enabled: bool) -> None:
+        with self._lock:
+            self._properties = self.properties._replace(
+                f_v2_safe_logarithmic=enabled
             )
 
     def check(self):

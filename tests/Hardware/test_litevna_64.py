@@ -1,6 +1,35 @@
-from NanoVNASaver.Hardware.LiteVNA64 import ScreenshotData
+from threading import RLock
+from unittest.mock import Mock, patch
+
+from NanoVNASaver.Hardware.LiteVNA64 import LiteVNA64, ScreenshotData
+from NanoVNASaver.Hardware.NanoVNA_V2 import NanoVNA_V2
 
 VALID_HEADER = b"\xe0\x01@\x01\x10"
+
+
+def test_measurements_do_not_exit_usb_mode() -> None:
+    device = object.__new__(LiteVNA64)
+    with (
+        patch.object(NanoVNA_V2, "readValues", return_value=[1 + 0j]) as read,
+        patch.object(device, "_exit_usb_mode") as exit_usb,
+    ):
+        assert device.readValues("data 0") == [1 + 0j]
+        assert device.readValues("data 1") == [1 + 0j]
+
+    assert read.call_count == 2
+    exit_usb.assert_not_called()
+
+
+def test_scheduled_refresh_exits_usb_mode() -> None:
+    device = object.__new__(LiteVNA64)
+    serial = Mock(is_open=True)
+    serial.lock = RLock()
+    device.serial = serial
+
+    with patch("NanoVNASaver.Hardware.LiteVNA64.sleep"):
+        device.power_reset()
+
+    serial.write.assert_called_once_with(b"\x20\x26\x02")
 
 
 class TestScreenshotData:

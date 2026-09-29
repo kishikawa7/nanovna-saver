@@ -642,6 +642,7 @@ class NanoVNASaver(QWidget):
 
         # ---- Sweep snapshot 初期化 ----
         self._sweep_snapshot = self.sweep.copy()
+        self._litevna_defaults_applied = False
 
         # ---- connect_device をラップ（接続直前に保存）----
         _orig_connect_device = self.serial_control.connect_device
@@ -676,6 +677,8 @@ class NanoVNASaver(QWidget):
         self._batch_active = False
         self._batch_cfg: BatchSweepConfig | None = None
         self._batch_index = 0
+        self._batch_last_completed_index = 0
+        self._batch_finished_wait_since = 0.0
         self._batch_last_sweep_failed = False
         self._batch_last_error_message = ""
         self._batch_last_connection_refresh_at = monotonic()
@@ -1109,7 +1112,8 @@ class NanoVNASaver(QWidget):
         self.worker.signals.updated.connect(self.dataUpdated)
         self.worker.signals.progress.connect(self.sweepProgressUpdated)
         self.worker.signals.finished.connect(self.sweepFinished)
-        self.worker.signals.finished.connect(self._on_sweep_finished_for_batch)
+        # Queue the next batch sweep only after the QThread has stopped.
+        self.worker.finished.connect(self._on_sweep_finished_for_batch)
         self.worker.signals.sweep_error.connect(self.showSweepError)
 
     def _safe_initial_window_size(self, app_config) -> tuple[int, int]:
@@ -1146,12 +1150,20 @@ class NanoVNASaver(QWidget):
                 return
             # 1) アプリ側 sweep を丸ごと復元（segments / averaging / log sweep など含む）
             self.sweep = self._sweep_snapshot.copy()
+            litevna_defaults_applied = self._apply_litevna_defaults()
             self._select_external_calibration_for_connected_vna()
             self._apply_vna6000_defaults()
             self._prefer_segment_log_sweep_for_vna6000()
 
             # 2) デバイス側に周波数レンジだけは必ず再適用（points設定APIは無いので不要）
             self.vna.resetSweep(int(self.sweep.start), int(self.sweep.end))
+            if litevna_defaults_applied:
+                default_start = self.sweep.start
+                default_end = self.sweep.end
+                self.sweep_control.set_start(default_start)
+                self.sweep_control.set_end(default_end)
+                self.sweep_control.update_center_span()
+                self.sweep_control.update_step_size()
             if "Bandwidth" in self.vna.features:
                 try:
                     self.vna.set_bandwidth(self.vna.bandwidth)
@@ -1166,6 +1178,26 @@ class NanoVNASaver(QWidget):
 
         except Exception as e:
             logger.warning("Failed to restore sweep after connect: %s", e)
+
+    def _apply_litevna_defaults(self) -> bool:
+        if (
+            self._litevna_defaults_applied
+            or getattr(self.vna, "name", "") != "LiteVNA-64"
+        ):
+            return False
+        self.sweep.update(
+            start=50_000,
+            end=6_000_000_000,
+            segments=self.sweep.segments,
+            points=self.vna.datapoints,
+        )
+        self.sweep.set_averages(3, 0)
+        sweep_settings = self.windows.get("sweep_settings")
+        if sweep_settings is not None:
+            sweep_settings.averages_input.setText("3")
+            sweep_settings.truncates_input.setText("0")
+        self._litevna_defaults_applied = True
+        return True
 
     def _connected_vna_is_vna6000(self) -> bool:
         board_revision = getattr(self.vna, "board_revision", None)
@@ -1857,6 +1889,8 @@ class NanoVNASaver(QWidget):
 
         self._batch_cfg = cfg
         self._batch_index = 0
+        self._batch_last_completed_index = 0
+        self._batch_finished_wait_since = 0.0
         self._batch_active = True
         self._batch_last_sweep_failed = False
         self._batch_last_error_message = ""
@@ -1896,6 +1930,7 @@ class NanoVNASaver(QWidget):
             return
 
         self._batch_index += 1
+        self._batch_finished_wait_since = 0.0
         self.sweep_start()
 
     def _batch_cancel_pending_action(self) -> None:
@@ -1939,6 +1974,24 @@ class NanoVNASaver(QWidget):
 
             action = self._batch_pending_action
             if action is None:
+                if self._batch_last_completed_index < self._batch_index:
+                    now = monotonic()
+                    if not self._batch_finished_wait_since:
+                        self._batch_finished_wait_since = now
+                        return
+                    if (
+                        now - self._batch_finished_wait_since
+                        <= BATCH_SCHEDULE_GRACE_S
+                    ):
+                        return
+                    message = (
+                        "worker stopped without a batch completion callback"
+                    )
+                    logger.warning(message)
+                    self._batch_last_sweep_failed = True
+                    self._batch_last_error_message = message
+                    self._on_sweep_finished_for_batch()
+                    return
                 message = "batch has no running worker or scheduled action"
                 logger.error(message)
                 self._batch_log_error(self._batch_index, message)
@@ -2023,6 +2076,10 @@ class NanoVNASaver(QWidget):
         # called on every sweep finish; only act if batch is active
         if not self._batch_active or not self._batch_cfg:
             return
+        if self._batch_last_completed_index == self._batch_index:
+            return
+        self._batch_last_completed_index = self._batch_index
+        self._batch_finished_wait_since = 0.0
 
         try:
             if self._batch_last_sweep_failed:
@@ -2047,7 +2104,8 @@ class NanoVNASaver(QWidget):
         finally:
             if self._batch_reboot_reconnecting:
                 return
-            if self._batch_active and self._batch_cfg:
+            reboot_due = self._batch_should_reboot_before_next_sweep()
+            if self._batch_active and self._batch_cfg and not reboot_due:
                 self._refresh_vna_connection_between_batch_sweeps()
             if self._batch_active and self._batch_cfg:
                 rest_ms = int(self._batch_cfg.rest_s * 1000)
@@ -2055,7 +2113,7 @@ class NanoVNASaver(QWidget):
                     rest_ms = max(rest_ms, BATCH_ERROR_RECOVERY_COOLDOWN_MS)
                     self._batch_needs_recovery_cooldown = False
 
-                if self._batch_should_reboot_before_next_sweep():
+                if reboot_due:
                     self._reboot_vna_for_batch(rest_ms)
                     return
 

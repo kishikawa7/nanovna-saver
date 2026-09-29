@@ -180,7 +180,26 @@ class SweepSettingsWindow(QtWidgets.QWidget):
         points_per_scan.valueChanged.connect(
             self.update_logarithmic_points_per_scan
         )
+        self.points_per_scan = points_per_scan
         layout.addRow("Log points per scan", points_per_scan)
+
+        self.checkbox_f_v2_safe_logarithmic = QtWidgets.QCheckBox(
+            "NanoVNA-F V2 exact log scan (11-point center sample)"
+        )
+        self.checkbox_f_v2_safe_logarithmic.setMinimumHeight(20)
+        self.checkbox_f_v2_safe_logarithmic.setChecked(
+            self.app.sweep.properties.f_v2_safe_logarithmic
+        )
+        self.checkbox_f_v2_safe_logarithmic.setToolTip(
+            "Runs a valid 11-point micro-sweep around each requested log "
+            "frequency and keeps only the exact center sample. Use Number of "
+            "measurements to average for repeated independent samples."
+        )
+        self.checkbox_f_v2_safe_logarithmic.toggled.connect(
+            self.update_f_v2_safe_logarithmic
+        )
+        layout.addRow(self.checkbox_f_v2_safe_logarithmic)
+        self._update_f_v2_safe_controls()
         if self.app.sweep.properties.logarithmic_measurement:
             self.enable_chart_lines()
 
@@ -279,6 +298,34 @@ class SweepSettingsWindow(QtWidgets.QWidget):
                 f"TX power {format_frequency_short}..{freq_range}",
                 power_sel,
             )
+        exact_f_v2_supported = callable(
+            getattr(
+                self.app.vna,
+                "read_centered_single_frequency",
+                None,
+            )
+        )
+        if (
+            exact_f_v2_supported
+            and self.checkbox_logarithmic_measurement.isChecked()
+        ):
+            self.checkbox_f_v2_safe_logarithmic.setChecked(True)
+        self._update_f_v2_safe_controls()
+
+    def _update_f_v2_safe_controls(self) -> None:
+        supported = callable(
+            getattr(
+                self.app.vna,
+                "read_centered_single_frequency",
+                None,
+            )
+        )
+        self.checkbox_f_v2_safe_logarithmic.setEnabled(supported)
+        if not supported and self.checkbox_f_v2_safe_logarithmic.isChecked():
+            self.checkbox_f_v2_safe_logarithmic.setChecked(False)
+        self.points_per_scan.setEnabled(
+            not self.checkbox_f_v2_safe_logarithmic.isChecked()
+        )
 
     def update_band(self, apply: bool = False):
         logger.debug("update_band(%s)", apply)
@@ -358,6 +405,7 @@ class SweepSettingsWindow(QtWidgets.QWidget):
             self.checkbox_logarithmic_measurement.setChecked(False)
             self.checkbox_logarithmic_measurement.blockSignals(False)
             self.app.sweep.set_logarithmic_measurement(False)
+            self.checkbox_f_v2_safe_logarithmic.setChecked(False)
         self.app.sweep.set_logarithmic(logarithmic)
         self.app.sweep_control.update_step_size()
 
@@ -369,14 +417,15 @@ class SweepSettingsWindow(QtWidgets.QWidget):
             self.checkbox_logarithmic.blockSignals(False)
             self.app.sweep.set_logarithmic(False)
             self.enable_chart_lines()
+        elif self.checkbox_f_v2_safe_logarithmic.isChecked():
+            self.checkbox_f_v2_safe_logarithmic.setChecked(False)
         self.app.sweep.set_logarithmic_measurement(logarithmic)
         self.app.sweep_control.update_step_size()
 
     def enable_chart_lines(self):
         app_config = get_app_config()
         app_config.chart.show_lines = True
-        if app_config.chart.point_size < 3:
-            app_config.chart.point_size = 3
+        app_config.chart.point_size = max(app_config.chart.point_size, 3)
         for chart in self.app.subscribing_charts:
             chart.setDrawLines(True)
             chart.setPointSize(app_config.chart.point_size)
@@ -400,6 +449,14 @@ class SweepSettingsWindow(QtWidgets.QWidget):
     def update_logarithmic_points_per_scan(self, points: int):
         logger.debug("update_logarithmic_points_per_scan(%s)", points)
         self.app.sweep.set_logarithmic_points_per_scan(points)
+        self.app.sweep_control.update_step_size()
+
+    def update_f_v2_safe_logarithmic(self, enabled: bool) -> None:
+        logger.debug("update_f_v2_safe_logarithmic(%s)", enabled)
+        if enabled and not self.checkbox_logarithmic_measurement.isChecked():
+            self.checkbox_logarithmic_measurement.setChecked(True)
+        self.app.sweep.set_f_v2_safe_logarithmic(enabled)
+        self.points_per_scan.setEnabled(not enabled)
         self.app.sweep_control.update_step_size()
 
     def update_mode(self, mode: "SweepMode"):

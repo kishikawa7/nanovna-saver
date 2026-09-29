@@ -233,9 +233,16 @@ class SweepControl(Control):
             self.update_sweep()
             points = sum(
                 1
-                for _ in self.app.sweep.get_logarithmic_measurement_frequencies()
+                for _ in (
+                    self.app.sweep.get_logarithmic_measurement_frequencies()
+                )
             )
-            self.label_step.setText(f"log spaced ({points} pts)")
+            if self.app.sweep.properties.f_v2_safe_logarithmic:
+                self.label_step.setText(
+                    f"exact log spaced ({points} pts; 11-pt center)"
+                )
+            else:
+                self.label_step.setText(f"log spaced ({points} pts)")
             return
         segments = self.get_segments()
         if segments > 0:

@@ -50,6 +50,7 @@ class DeviceSettingsWindow(QtWidgets.QWidget):
             "firmware": QtWidgets.QLabel("Not connected."),
             "hardware": QtWidgets.QLabel("Not connected."),
             "calibration": QtWidgets.QLabel("Not connected."),
+            "app_calibration": QtWidgets.QLabel("OFF"),
             "SN": QtWidgets.QLabel("Not connected."),
         }
 
@@ -66,7 +67,10 @@ class DeviceSettingsWindow(QtWidgets.QWidget):
         status_layout.addRow("Status:", self.label["status"])
         status_layout.addRow("Firmware:", self.label["firmware"])
         status_layout.addRow("Hardware:", self.label["hardware"])
-        status_layout.addRow("Calibration:", self.label["calibration"])
+        status_layout.addRow("Device CAL:", self.label["calibration"])
+        status_layout.addRow(
+            "NanoVNA-Saver CAL:", self.label["app_calibration"]
+        )
         status_layout.addRow("SN:", self.label["SN"])
 
         status_layout.addRow(QtWidgets.QLabel("Features:"))
@@ -125,12 +129,18 @@ class DeviceSettingsWindow(QtWidgets.QWidget):
 
         self.bandwidth = QtWidgets.QComboBox()
         self.bandwidth.addItem(str(self.app.vna.bandwidth))
+        self.bandwidth.setToolTip(
+            "IF bandwidth in Hz. This control is available only when the "
+            "connected firmware exposes the 'bandwidth' command."
+        )
         self.bandwidth.currentIndexChanged.connect(self.updateBandwidth)
 
         form_layout = QtWidgets.QFormLayout()
         form_layout.addRow(QtWidgets.QLabel("Datapoints"), self.datapoints)
         form_layout.addRow(self.custom_points_checkbox, self.custom_points_edit)
-        form_layout.addRow(QtWidgets.QLabel("Bandwidth"), self.bandwidth)
+        form_layout.addRow(
+            QtWidgets.QLabel("IF bandwidth (Hz)"), self.bandwidth
+        )
         right_layout.addWidget(settings_box)
         settings_layout.addRow(form_layout)
 
@@ -144,21 +154,29 @@ class DeviceSettingsWindow(QtWidgets.QWidget):
         super().show()
         self.updateFields()
 
+    def _app_calibration_status(self) -> str:
+        calibration = self.app.calibration
+        if not calibration.isCalculated:
+            return "OFF"
+        source = str(getattr(calibration, "source", "")).strip()
+        return f"ON ({source})" if source else "ON"
+
     def updateFields(self):
+        self.label["app_calibration"].setText(
+            self._app_calibration_status()
+        )
         if not self.app.vna.connected():
             self.label["status"].setText("Not connected.")
             self.label["firmware"].setText("Not connected.")
             self.label["hardware"].setText("Not connected.")
-            # self.label["calibration"].setText("Not connected.")
-            try:
-                self.label["calibration"].setText(self.app.vna.getCalibration())
-            except Exception as e:
-                logger.warning("DeviceSettings.updateFields: calibration read failed: %s", e)
-                self.label["calibration"].setText("N/A")
+            self.label["calibration"].setText("Not connected.")
             self.label["SN"].setText("Not connected.")
             self.featureList.clear()
             self.btnCaptureScreenshot.setDisabled(True)
             self.btnLiveView.setDisabled(True)
+            self.bandwidth.setDisabled(True)
+            self.bandwidth.clear()
+            self.bandwidth.addItem("Not connected")
             return
 
         self.label["status"].setText(f"Connected to {self.app.vna.name}.")
@@ -195,6 +213,7 @@ class DeviceSettingsWindow(QtWidgets.QWidget):
             self.datapoints.setDisabled(True)
 
         if "Bandwidth" in features:
+            self.bandwidth.setDisabled(True)
             self.bandwidth.clear()
             cur_bw = self.app.vna.bandwidth
             for d in sorted(self.app.vna.get_bandwidths()):
@@ -203,6 +222,8 @@ class DeviceSettingsWindow(QtWidgets.QWidget):
             self.bandwidth.setDisabled(False)
         else:
             self.bandwidth.setDisabled(True)
+            self.bandwidth.clear()
+            self.bandwidth.addItem("Not supported by firmware")
 
     def updateValidation(self, validate_data: bool) -> None:
         self.app.vna.validateInput = validate_data
@@ -230,7 +251,11 @@ class DeviceSettingsWindow(QtWidgets.QWidget):
         self.app.sweep_control.update_step_size()
 
     def updateBandwidth(self, i) -> None:
-        if i < 0 or self.app.worker.isRunning():
+        if (
+            i < 0
+            or self.app.worker.isRunning()
+            or not self.bandwidth.isEnabled()
+        ):
             return
         logger.debug("Bandwidth: %s", self.bandwidth.itemText(i))
         self.app.vna.set_bandwidth(int(self.bandwidth.itemText(i)))

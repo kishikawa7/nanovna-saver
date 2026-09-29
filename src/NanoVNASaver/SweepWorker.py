@@ -18,6 +18,7 @@
 #  along with this program.  If not, see <https://www.gnu.org/licenses/>.
 import contextlib
 import logging
+from collections.abc import Callable
 from math import floor, log10
 from time import monotonic, sleep
 from typing import TYPE_CHECKING
@@ -107,7 +108,10 @@ class SweepWorker(QThread):
                 self.signals.finished.emit()
             else:
                 self.gui_error(f"ERROR during sweep\n\nStopped\n\n{exc}")
-            if logger.isEnabledFor(logging.DEBUG) and not self.app._batch_active:
+            if (
+                logger.isEnabledFor(logging.DEBUG)
+                and not self.app._batch_active
+            ):
                 raise exc
 
     def _run(self) -> None:
@@ -129,7 +133,7 @@ class SweepWorker(QThread):
 
         self._run_loop()
 
-        if sweep.segments > 1:
+        if sweep.segments > 1 or sweep.properties.logarithmic_measurement:
             start = sweep.start
             end = sweep.end
             logger.debug(
@@ -194,6 +198,7 @@ class SweepWorker(QThread):
         self.data21 = []
         self.rawData11 = []
         self.rawData21 = []
+        self._preserve_previous_batch_trace = False
         if self.sweep.properties.logarithmic_measurement:
             frequencies = list(
                 self.sweep.get_logarithmic_measurement_frequencies()
@@ -201,6 +206,9 @@ class SweepWorker(QThread):
         else:
             frequencies = list(self.sweep.get_frequencies())
         if self._init_from_previous_data(frequencies):
+            self._preserve_previous_batch_trace = bool(
+                getattr(self.app, "_batch_active", False)
+            )
             return
         for freq in frequencies:
             self.data11.append(Datapoint(freq, 0.0, 0.0))
@@ -277,6 +285,7 @@ class SweepWorker(QThread):
         frequencies: list[int],
         values11: list[complex],
         values21: list[complex],
+        preserve_tail: bool = False,
     ) -> None:
         raw_data11 = [
             Datapoint(freq, values11[i].real, values11[i].imag)
@@ -297,7 +306,13 @@ class SweepWorker(QThread):
             self.data21[i] = data21[i]
             self.rawData11[i] = raw_data11[i]
             self.rawData21[i] = raw_data21[i]
-        self.app.saveData(self.data11, self.data21)
+        if preserve_tail:
+            self.app.saveData(self.data11, self.data21)
+        else:
+            self.app.saveData(
+                self.data11[: len(frequencies)],
+                self.data21[: len(frequencies)],
+            )
         self.signals.updated.emit()
 
     def applyCalibration(
@@ -437,10 +452,14 @@ class SweepWorker(QThread):
         original_datapoints = self.app.vna.datapoints
         total_reads = max(1, len(frequencies) * averages)
         completed_reads = 0
-        next_partial_update = self._first_decade_boundary(frequencies[0])
-        points_per_scan = max(
-            1,
-            self.sweep.properties.logarithmic_points_per_scan,
+        safe_f_v2_scan = self._safe_f_v2_logarithmic_enabled()
+        points_per_scan = (
+            1
+            if safe_f_v2_scan
+            else max(
+                1,
+                self.sweep.properties.logarithmic_points_per_scan,
+            )
         )
 
         try:
@@ -463,6 +482,10 @@ class SweepWorker(QThread):
                 tmp_freq: list[int] = []
                 tmp_11: list[complex] = []
                 tmp_21: list[complex] = []
+                next_partial_update = self._first_decade_boundary(
+                    frequencies[0]
+                )
+                last_partial_update_count = 0
 
                 for start_index in range(0, len(frequencies), points_per_scan):
                     if self._terminate:
@@ -470,10 +493,36 @@ class SweepWorker(QThread):
                     chunk = frequencies[
                         start_index : start_index + points_per_scan
                     ]
-                    self.app.vna.datapoints = len(chunk)
-                    measured_freq, point_11, point_21 = (
-                        self._read_segment_with_retries(chunk[0], chunk[-1])
-                    )
+                    if safe_f_v2_scan:
+                        measured_freq, point_11, point_21 = (
+                            self._read_safe_f_v2_frequency(chunk[0])
+                        )
+                    else:
+                        self.app.vna.datapoints = len(chunk)
+                        prime_first_point = bool(
+                            start_index == 0
+                            and len(chunk) == 1
+                            and getattr(
+                                self.app.vna,
+                                "prime_first_logarithmic_point",
+                                False,
+                            )
+                        )
+                        measured_freq, point_11, point_21 = (
+                            self._read_segment_with_retries(
+                                chunk[0],
+                                chunk[-1],
+                                (
+                                    lambda: self.read_segment(
+                                        chunk[0],
+                                        chunk[-1],
+                                        discard_first_sample=True,
+                                    )
+                                )
+                                if prime_first_point
+                                else None,
+                            )
+                        )
                     if not point_11:
                         raise IOError("Invalid data during logarithmic sweep")
 
@@ -488,7 +537,9 @@ class SweepWorker(QThread):
                     if len(chunk) > len(point_11):
                         raise IOError("Invalid data during logarithmic sweep")
 
-                    for target_freq, measured_index in zip(chunk, selected):
+                    for target_freq, measured_index in zip(
+                        chunk, selected, strict=False
+                    ):
                         if tmp_freq and target_freq == tmp_freq[-1]:
                             continue
                         tmp_freq.append(target_freq)
@@ -497,13 +548,15 @@ class SweepWorker(QThread):
                         completed_reads += 1
                         self.percentage = completed_reads * 100 / total_reads
                         self.signals.progress.emit()
-                        while (
-                            averages == 1
-                            and tmp_freq[-1] >= next_partial_update
-                        ):
-                            self.update_logarithmic_partial_data(
-                                tmp_freq, tmp_11, tmp_21
+                        while tmp_freq[-1] >= next_partial_update:
+                            self._update_logarithmic_running_average(
+                                tmp_freq,
+                                tmp_11,
+                                tmp_21,
+                                values11,
+                                values21,
                             )
+                            last_partial_update_count = len(tmp_freq)
                             next_partial_update *= 10
                     if points_per_scan == 1 and not self._terminate:
                         sleep(LOG_SINGLE_POINT_SCAN_COOLDOWN_S)
@@ -511,6 +564,15 @@ class SweepWorker(QThread):
 
                 if self._terminate:
                     break
+                if (
+                    averages > 1 and not values11
+                    and len(tmp_freq) > last_partial_update_count
+                ):
+                    # Complete the first trace before the next averaging pass
+                    # starts updating it from the low-frequency end.
+                    self.update_logarithmic_partial_data(
+                        tmp_freq, tmp_11, tmp_21
+                    )
                 measured_freqs = tmp_freq
                 values11.append(tmp_11)
                 values21.append(tmp_21)
@@ -537,6 +599,69 @@ class SweepWorker(QThread):
             np.average(values21, axis=0).tolist(),
         )
 
+    def _update_logarithmic_running_average(
+        self,
+        frequencies: list[int],
+        current11: list[complex],
+        current21: list[complex],
+        completed11: list[list[complex]],
+        completed21: list[list[complex]],
+    ) -> None:
+        count = len(frequencies)
+        samples11 = [values[:count] for values in completed11]
+        samples21 = [values[:count] for values in completed21]
+        samples11.append(current11)
+        samples21.append(current21)
+        self.update_logarithmic_partial_data(
+            frequencies,
+            np.average(samples11, axis=0).tolist(),
+            np.average(samples21, axis=0).tolist(),
+            preserve_tail=(
+                bool(completed11) or self._preserve_previous_batch_trace
+            ),
+        )
+
+    def _safe_f_v2_logarithmic_enabled(self) -> bool:
+        return bool(
+            self.sweep.properties.f_v2_safe_logarithmic
+            and callable(
+                getattr(
+                    self.app.vna,
+                    "read_centered_single_frequency",
+                    None,
+                )
+            )
+        )
+
+    def _read_safe_f_v2_frequency(
+        self, frequency: int
+    ) -> tuple[list[int], list[complex], list[complex]]:
+        vna = self.app.vna
+        points = int(vna.safe_logarithmic_scan_points)
+        vna.datapoints = points
+
+        measured, values11, values21 = self._read_segment_with_retries(
+            frequency,
+            frequency,
+            lambda: vna.read_centered_single_frequency(frequency),
+        )
+        if not (len(measured) == len(values11) == len(values21) == 1):
+            raise IOError(
+                "Invalid centered single-frequency data: "
+                "expected one selected row, got "
+                f"{len(measured)}/{len(values11)}/{len(values21)}"
+            )
+        if measured[0] != frequency:
+            raise IOError(
+                "Centered single-frequency scan returned a different frequency"
+            )
+        logger.debug(
+            "F V2 centered %d-point scan selected %d Hz",
+            points,
+            frequency,
+        )
+        return measured, values11, values21
+
     @staticmethod
     def _nearest_frequency_index(
         measured_frequencies: list[int], target_frequency: int
@@ -549,7 +674,13 @@ class SweepWorker(QThread):
         )
 
     def _read_segment_with_retries(
-        self, start: int, stop: int
+        self,
+        start: int,
+        stop: int,
+        reader: Callable[
+            [], tuple[list[int], list[complex], list[complex]]
+        ]
+        | None = None,
     ) -> tuple[list[int], list[complex], list[complex]]:
         retries = RETRIES_RECONNECT
         freq: list[int] = []
@@ -565,7 +696,10 @@ class SweepWorker(QThread):
             retries -= 1
             segment_started = monotonic()
             try:
-                freq, values11, values21 = self.read_segment(start, stop)
+                if reader is not None:
+                    freq, values11, values21 = reader()
+                else:
+                    freq, values11, values21 = self.read_segment(start, stop)
             except VNACommandRetryExceeded as exc:
                 logger.warning(
                     "readSegment(%s,%s) communication failed: %s",
@@ -595,15 +729,30 @@ class SweepWorker(QThread):
         return freq, values11, values21
 
     def read_segment(
-        self, start: int, stop: int
+        self, start: int, stop: int, discard_first_sample: bool = False
     ) -> tuple[list[int], list[complex], list[complex]]:
         logger.debug("Setting sweep range to %d to %d", start, stop)
         self.app.vna.setSweep(start, stop)
 
         frequencies = self.app.vna.read_frequencies()
         logger.debug("Read %s frequencies", len(frequencies))
+        discarded = None
+        if discard_first_sample:
+            # LiteVNA's first single-frequency acquisition may precede its
+            # reference measurement. Read it without applying validation and
+            # leave the sweep configuration unchanged for the next sample.
+            discarded = self.app.vna.readValues("data 0")
         values11 = self.read_data("data 0")
         values21 = self.read_data("data 1")
+        if discard_first_sample:
+            logger.debug(
+                "Primed first LiteVNA point at %d Hz: discarded S11=%s, "
+                "kept S11=%s S21=%s",
+                start,
+                discarded,
+                values11,
+                values21,
+            )
         if not len(frequencies) == len(values11) == len(values21):
             logger.info("No valid data during this run")
             frequencies = []

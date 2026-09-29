@@ -45,8 +45,9 @@ DISLORD_BW = {
 }
 WAIT = 0.05
 MIN_COMMAND_WAIT = 0.20
+COMMAND_POLL_WAIT = 0.40
 COMMAND_TIMEOUT = 35.0
-RECONNECT_SETTLE_TIME = 1.0
+RECONNECT_SETTLE_TIME = 5.0
 USBDEVFS_RESET = (ord("U") << 8) | 20
 
 
@@ -248,7 +249,7 @@ class VNA:
 
             wait = max(wait, _command_wait(command, self.bandwidth, self.datapoints))
             sleep(wait)
-            poll_wait = min(wait, 0.2)
+            poll_wait = COMMAND_POLL_WAIT
             deadline = monotonic() + COMMAND_TIMEOUT
             ser.timeout = max(0.05, poll_wait)
 
