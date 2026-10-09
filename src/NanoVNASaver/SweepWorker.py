@@ -499,12 +499,11 @@ class SweepWorker(QThread):
                         )
                     else:
                         self.app.vna.datapoints = len(chunk)
-                        prime_first_point = bool(
-                            start_index == 0
-                            and len(chunk) == 1
+                        prime_single_point = bool(
+                            len(chunk) == 1
                             and getattr(
                                 self.app.vna,
-                                "prime_first_logarithmic_point",
+                                "prime_each_logarithmic_point",
                                 False,
                             )
                         )
@@ -513,13 +512,13 @@ class SweepWorker(QThread):
                                 chunk[0],
                                 chunk[-1],
                                 (
-                                    lambda: self.read_segment(
+                                    lambda chunk=chunk: self.read_segment(
                                         chunk[0],
                                         chunk[-1],
                                         discard_first_sample=True,
                                     )
                                 )
-                                if prime_first_point
+                                if prime_single_point
                                 else None,
                             )
                         )
@@ -565,7 +564,8 @@ class SweepWorker(QThread):
                 if self._terminate:
                     break
                 if (
-                    averages > 1 and not values11
+                    averages > 1
+                    and not values11
                     and len(tmp_freq) > last_partial_update_count
                 ):
                     # Complete the first trace before the next averaging pass
@@ -677,9 +677,7 @@ class SweepWorker(QThread):
         self,
         start: int,
         stop: int,
-        reader: Callable[
-            [], tuple[list[int], list[complex], list[complex]]
-        ]
+        reader: Callable[[], tuple[list[int], list[complex], list[complex]]]
         | None = None,
     ) -> tuple[list[int], list[complex], list[complex]]:
         retries = RETRIES_RECONNECT
@@ -741,18 +739,40 @@ class SweepWorker(QThread):
             # LiteVNA's first single-frequency acquisition may precede its
             # reference measurement. Read it without applying validation and
             # leave the sweep configuration unchanged for the next sample.
-            discarded = self.app.vna.readValues("data 0")
-        values11 = self.read_data("data 0")
-        values21 = self.read_data("data 1")
+            try:
+                discarded = self.app.vna.readValues("data 0")
+            except ValueError as exc:
+                logger.warning("LiteVNA priming read failed: %s", exc)
+                self.app.vna.reconnect()
+                self.app.vna.setSweep(start, stop)
+                discarded = self.app.vna.readValues("data 0")
         if discard_first_sample:
+            first11 = self.read_data("data 0")
+            first21 = self.read_data("data 1")
+            second11 = self.read_data("data 0")
+            second21 = self.read_data("data 1")
+            if not (
+                len(frequencies)
+                == len(first11)
+                == len(first21)
+                == len(second11)
+                == len(second21)
+            ):
+                logger.info("No valid data during this run")
+                return [], [], []
+            values11 = [(a + b) / 2 for a, b in zip(first11, second11)]
+            values21 = [(a + b) / 2 for a, b in zip(first21, second21)]
             logger.debug(
                 "Primed first LiteVNA point at %d Hz: discarded S11=%s, "
-                "kept S11=%s S21=%s",
+                "averaged S11=%s S21=%s",
                 start,
                 discarded,
                 values11,
                 values21,
             )
+        else:
+            values11 = self.read_data("data 0")
+            values21 = self.read_data("data 1")
         if not len(frequencies) == len(values11) == len(values21):
             logger.info("No valid data during this run")
             frequencies = []

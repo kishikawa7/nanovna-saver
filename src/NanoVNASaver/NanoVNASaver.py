@@ -38,6 +38,7 @@ from PySide6.QtWidgets import QWidget
 
 from .About import VERSION
 from .Calibration import Calibration
+from .CalibrationNote import save_calibration_note
 from .Charts import (
     CapacitanceChart,
     CombinedLogMagChart,
@@ -191,6 +192,8 @@ measured = []
 cal = None
 _cal_cache_key = ()
 _cal_cache = None
+_ideal_cal_cache_key = ()
+_ideal_cal_cache = None
 
 
 def _ensure_calpath(path: str) -> str:
@@ -228,26 +231,26 @@ def _load_external_calibration(path: str):
         loaded_media.thru(),
     ]
 
-    fixed_ans = {
-        name: ansdata[name].interpolate(
-            loaded_freq, kind='linear', fill_value='extrapolate'
-        )
-        for name in (
-            'short_P1',
-            'open_P1',
-            'load_P1',
-            'short_P2',
-            'open_P2',
-            'load_P2',
-            'thru',
-        )
-    }
-    loaded_ans_ideals = [
-        two_port_reflect(fixed_ans['short_P1'].s11, fixed_ans['short_P2'].s22),
-        two_port_reflect(fixed_ans['open_P1'].s11, fixed_ans['open_P2'].s22),
-        two_port_reflect(fixed_ans['load_P1'].s11, fixed_ans['load_P2'].s22),
-        fixed_ans['thru'],
-    ]
+    loaded_ans_ideals = []
+    if all(name in ansdata for name in (
+        'short_P1', 'open_P1', 'load_P1',
+        'short_P2', 'open_P2', 'load_P2', 'thru',
+    )):
+        fixed_ans = {
+            name: ansdata[name].interpolate(
+                loaded_freq, kind='linear', fill_value='extrapolate'
+            )
+            for name in (
+                'short_P1', 'open_P1', 'load_P1',
+                'short_P2', 'open_P2', 'load_P2', 'thru',
+            )
+        }
+        loaded_ans_ideals = [
+            two_port_reflect(fixed_ans['short_P1'].s11, fixed_ans['short_P2'].s22),
+            two_port_reflect(fixed_ans['open_P1'].s11, fixed_ans['open_P2'].s22),
+            two_port_reflect(fixed_ans['load_P1'].s11, fixed_ans['load_P2'].s22),
+            fixed_ans['thru'],
+        ]
 
     measured_thru = loaded_caldata['thru']['ntwk']
     short_meas_2p = two_port_reflect(
@@ -269,10 +272,9 @@ def _load_external_calibration(path: str):
         measured_thru,
     ]
 
-    loaded_cal = SOLT(
-        ideals=loaded_ans_ideals,
-        measured=loaded_measured,
-        n_ports=2,
+    loaded_cal = (
+        SOLT(ideals=loaded_ans_ideals, measured=loaded_measured, n_ports=2)
+        if loaded_ans_ideals else None
     )
     return (
         loaded_caldata,
@@ -287,10 +289,10 @@ def _load_external_calibration(path: str):
 
 def set_external_calibration_path(path: str) -> bool:
     global calpath, caldata, freq, media, ideals, ans_ideals, measured, cal
-    global _cal_cache_key, _cal_cache
+    global _cal_cache_key, _cal_cache, _ideal_cal_cache_key, _ideal_cal_cache
 
     path = _ensure_calpath(path)
-    if path == calpath and _cal_cache is not None:
+    if path == calpath and caldata:
         return True
 
     try:
@@ -319,6 +321,8 @@ def set_external_calibration_path(path: str) -> bool:
     cal = new_cal
     _cal_cache_key = ()
     _cal_cache = new_cal
+    _ideal_cal_cache_key = ()
+    _ideal_cal_cache = None
     logger.info("External calibration path: %s", calpath)
     return True
 
@@ -334,31 +338,40 @@ def _network_at_frequency(ntwk, frequency):
     return ntwk.interpolate(frequency, kind="linear", fill_value="extrapolate")
 
 
-def _calibration_at_frequency(frequency):
-    global _cal_cache_key, _cal_cache
+def _calibration_at_frequency(frequency, ideal: bool = False):
+    global _cal_cache_key, _cal_cache, _ideal_cal_cache_key, _ideal_cal_cache
 
     key = _frequency_key(frequency)
-    if key == _cal_cache_key:
+    if ideal and key == _ideal_cal_cache_key:
+        return _ideal_cal_cache
+    if not ideal and key == _cal_cache_key:
         return _cal_cache
 
-    fixed_ans = {
-        name: _network_at_frequency(ansdata[name], frequency)
-        for name in (
-            "short_P1",
-            "open_P1",
-            "load_P1",
-            "short_P2",
-            "open_P2",
-            "load_P2",
-            "thru",
+    if ideal:
+        beta = 2 * np.pi * frequency.f / RF_C
+        target_media = DefinedGammaZ0(
+            frequency=frequency, z0=50, gamma=1j * beta
         )
-    }
-    target_ideals = [
-        two_port_reflect(fixed_ans["short_P1"].s11, fixed_ans["short_P2"].s22),
-        two_port_reflect(fixed_ans["open_P1"].s11, fixed_ans["open_P2"].s22),
-        two_port_reflect(fixed_ans["load_P1"].s11, fixed_ans["load_P2"].s22),
-        fixed_ans["thru"],
-    ]
+        target_ideals = [
+            target_media.short(nports=2),
+            target_media.open(nports=2),
+            target_media.match(nports=2),
+            target_media.thru(),
+        ]
+    else:
+        fixed_ans = {
+            name: _network_at_frequency(ansdata[name], frequency)
+            for name in (
+                "short_P1", "open_P1", "load_P1",
+                "short_P2", "open_P2", "load_P2", "thru",
+            )
+        }
+        target_ideals = [
+            two_port_reflect(fixed_ans["short_P1"].s11, fixed_ans["short_P2"].s22),
+            two_port_reflect(fixed_ans["open_P1"].s11, fixed_ans["open_P2"].s22),
+            two_port_reflect(fixed_ans["load_P1"].s11, fixed_ans["load_P2"].s22),
+            fixed_ans["thru"],
+        ]
 
     fixed_meas = {
         name: _network_at_frequency(caldata[name]["ntwk"], frequency)
@@ -371,17 +384,20 @@ def _calibration_at_frequency(frequency):
         fixed_meas["thru"],
     ]
 
-    _cal_cache_key = key
-    _cal_cache = SOLT(
+    result = SOLT(
         ideals=target_ideals,
         measured=target_measured,
         n_ports=2,
     )
-    return _cal_cache
+    if ideal:
+        _ideal_cal_cache_key, _ideal_cal_cache = key, result
+    else:
+        _cal_cache_key, _cal_cache = key, result
+    return result
 
 
-def apply_external_calibration(ntwk):
-    return _calibration_at_frequency(ntwk.frequency).apply_cal(ntwk)
+def apply_external_calibration(ntwk, ideal: bool = False):
+    return _calibration_at_frequency(ntwk.frequency, ideal).apply_cal(ntwk)
 
 
 def calculate_cal_shunt_z(
@@ -568,7 +584,7 @@ class BatchSweepDialog(QtWidgets.QDialog):
         )
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
-        layout.addRow(buttons)        
+        layout.addRow(buttons)
 
     # def _browse_dir(self):
     #     d = QtWidgets.QFileDialog.getExistingDirectory(self, "Select directory", self.dir_edit.text() or os.path.expanduser("~"))
@@ -603,7 +619,7 @@ class BatchSweepDialog(QtWidgets.QDialog):
                 reboot_every=reboot_every,
                 save_temperature=save_temperature,
         )
-    
+
 class NanoVNASaver(QWidget):
     version = VERSION
     scale_factor = 1.0
@@ -670,6 +686,10 @@ class NanoVNASaver(QWidget):
         self.ref_data: Touchstone = Touchstone()
         self.calibrated_s11 = []
         self.calibrated_s21 = []
+        self.ideal_calibrated_s11 = []
+        self.ideal_calibrated_s21 = []
+        self.calibrated_calpath = ""
+        self.calibrated_reference_path = ""
         self.cal_shunt_z = []
         self.cal_shunt_z_short_corrected = []
 
@@ -786,6 +806,21 @@ class NanoVNASaver(QWidget):
                     )
                 ),
             },
+            "ideal_calibration": {
+                "S11_db_phase": LogMagPhaseChart("iCal S11 db/phase"),
+                "S21_db_phase": LogMagPhaseChart("iCal S21 db/phase"),
+                "real_imag_shunt": RealImaginaryZShuntChart(
+                    "iCal S21 R+jX shunt"
+                ),
+                "real_imag_shunt_formula": RealImaginaryZComputedChart(
+                    "iCal ShuntZ formula R+jX"
+                ),
+                "real_imag_shunt_formula_socket_short": (
+                    RealImaginaryZComputedChart(
+                        "iCal ShuntZ formula fixture-corrected R+jX"
+                    )
+                ),
+            },
         }
         self.tdr_chart: TDRChart = TDRChart("TDR")
         self.tdr_mainwindow_chart = TDRChart("TDR")
@@ -801,6 +836,9 @@ class NanoVNASaver(QWidget):
 
         # List of all charts that use both S11 and S21
         self.calibrationCharts = list(self.charts["calibration"].values())
+        self.idealCalibrationCharts = list(
+            self.charts["ideal_calibration"].values()
+        )
 
         # List of all charts that can be selected for display
         self.selectable_charts = (
@@ -808,6 +846,7 @@ class NanoVNASaver(QWidget):
             + self.s21charts
             + self.combinedCharts
             + self.calibrationCharts
+            + self.idealCalibrationCharts
             + [
                 self.tdr_mainwindow_chart,
             ]
@@ -859,7 +898,6 @@ class NanoVNASaver(QWidget):
             "setup": DisplaySettingsWindow(self),
             "tdr": TDRWindow(self),
         }
-
         ###############################################################
         #  Sweep control
         ###############################################################
@@ -1106,7 +1144,7 @@ class NanoVNASaver(QWidget):
 
         # self.temperature_logging_enabled = True
 
-        
+
 
     def _connect_worker_signals(self) -> None:
         self.worker.signals.updated.connect(self.dataUpdated)
@@ -1423,24 +1461,46 @@ class NanoVNASaver(QWidget):
         if worker_progress != self._batch_watchdog_progress:
             self._batch_watchdog_progress = worker_progress
             self._batch_watchdog_changed_at = monotonic()
-    
+
         with self.dataLock:
             s11 = self.data.s11[:]
             s21 = self.data.s21[:]
             s11_cal = []
             s21_cal = []
+            s11_ical = []
+            s21_ical = []
+            calibration_path = ""
             cal_shunt_z = []
             cal_shunt_z_short_corrected = []
+            ical_shunt_z = []
+            ical_shunt_z_short_corrected = []
             if s11:
                 try:
                     ntwk = self.data.to_skrf_network()
                     ntwk = make_full_thru_network(ntwk)
                     ntwk = average_duplicate_freq(ntwk)
+                    try:
+                        ideal_cal = apply_external_calibration(ntwk, ideal=True)
+                        ts_ideal = Touchstone()
+                        ts_ideal.from_skrf_network(ideal_cal)
+                        s11_ical = ts_ideal.s11[:]
+                        s21_ical = ts_ideal.s21[:]
+                        ical_shunt_z = calculate_cal_shunt_z(
+                            s11_ical, s21_ical
+                        )
+                        ical_shunt_z_short_corrected = (
+                            calculate_socket_short_corrected_shunt_z(
+                                ical_shunt_z, ideal_cal.frequency
+                            )
+                        )
+                    except Exception as exc:
+                        logger.warning("Ideal calibration skipped: %s", exc)
                     data_cal = apply_external_calibration(ntwk)
                     tscal = Touchstone()
                     tscal.from_skrf_network(data_cal)
                     s11_cal = tscal.s11[:]
                     s21_cal = tscal.s21[:]
+                    calibration_path = calpath
                     log_external_calibration_delta(
                         s11, s21, s11_cal, s21_cal
                     )
@@ -1455,6 +1515,12 @@ class NanoVNASaver(QWidget):
                     logger.warning("External calibration skipped: %s", exc)
             self.calibrated_s11 = s11_cal
             self.calibrated_s21 = s21_cal
+            self.ideal_calibrated_s11 = s11_ical
+            self.ideal_calibrated_s21 = s21_ical
+            self.calibrated_calpath = calibration_path or (
+                calpath if s11_ical else ""
+            )
+            self.calibrated_reference_path = kVNApath if calibration_path else ""
             self.cal_shunt_z = cal_shunt_z
             self.cal_shunt_z_short_corrected = cal_shunt_z_short_corrected
             logger.debug(
@@ -1464,7 +1530,7 @@ class NanoVNASaver(QWidget):
                 len(s21_cal),
             )
             # print(ntwk.s[:,1,0],s21_cal[0])
-            
+
 
         self._set_chart_frequency_range()
 
@@ -1496,6 +1562,13 @@ class NanoVNASaver(QWidget):
         self.calibrationCharts[2].setData(s21_cal)#real_imag_shunt
         self.calibrationCharts[3].setData(cal_shunt_z)#real_imag_shunt_formula
         self.calibrationCharts[4].setData(cal_shunt_z_short_corrected)
+        ical_values = dict(zip(
+            (chart.name for chart in self.idealCalibrationCharts[:5]),
+            (s11_ical, s21_ical, s21_ical, ical_shunt_z,
+             ical_shunt_z_short_corrected),
+        ))
+        for chart in self.idealCalibrationCharts:
+            chart.setData(ical_values[chart.name])
 
         self.sweep_control.progress_bar.setValue(int(worker_progress))
         self.windows["tdr"].updateTDR()
@@ -1561,8 +1634,12 @@ class NanoVNASaver(QWidget):
     def setReference(self, s11=None, s21=None, source=None):
         s11_cal = []
         s21_cal = []
+        s11_ical = []
+        s21_ical = []
         cal_shunt_z = []
         cal_shunt_z_short_corrected = []
+        ical_shunt_z = []
+        ical_shunt_z_short_corrected = []
         if not s11:
             with self.dataLock:
                 s11 = self.data.s11[:]
@@ -1572,6 +1649,24 @@ class NanoVNASaver(QWidget):
                         ntwk = self.data.to_skrf_network()
                         ntwk = make_full_thru_network(ntwk)
                         ntwk = average_duplicate_freq(ntwk)
+                        try:
+                            ideal_cal = apply_external_calibration(ntwk, ideal=True)
+                            ts_ideal = Touchstone()
+                            ts_ideal.from_skrf_network(ideal_cal)
+                            s11_ical = ts_ideal.s11[:]
+                            s21_ical = ts_ideal.s21[:]
+                            ical_shunt_z = calculate_cal_shunt_z(
+                                s11_ical, s21_ical
+                            )
+                            ical_shunt_z_short_corrected = (
+                                calculate_socket_short_corrected_shunt_z(
+                                    ical_shunt_z, ideal_cal.frequency
+                                )
+                            )
+                        except Exception as exc:
+                            logger.warning(
+                                "Ideal reference calibration skipped: %s", exc
+                            )
                         data_cal = apply_external_calibration(ntwk)
                         tscal = Touchstone()
                         tscal.from_skrf_network(data_cal)
@@ -1609,6 +1704,13 @@ class NanoVNASaver(QWidget):
         self.calibrationCharts[2].setReference(s21_cal)#real_imag_shunt
         self.calibrationCharts[3].setReference(cal_shunt_z)#real_imag_shunt_formula
         self.calibrationCharts[4].setReference(cal_shunt_z_short_corrected)
+        ical_values = dict(zip(
+            (chart.name for chart in self.idealCalibrationCharts[:5]),
+            (s11_ical, s21_ical, s21_ical, ical_shunt_z,
+             ical_shunt_z_short_corrected),
+        ))
+        for chart in self.idealCalibrationCharts:
+            chart.setReference(ical_values[chart.name])
 
         self.btnResetReference.setDisabled(False)
 
@@ -1780,7 +1882,7 @@ class NanoVNASaver(QWidget):
         #     self.vna.flushSerialBuffers()  # Remove any left-over data
         #     self.vna.reconnect()  # try reconnection
         # self.sweepFinished()
-        
+
         msg = self.worker.error_message or "Unknown sweep error"
 
         # batch sweep中は止めずに記録して継続
@@ -1822,6 +1924,8 @@ class NanoVNASaver(QWidget):
             self.combinedCharts.append(new_chart)
         if chart in self.calibrationCharts:
             self.calibrationCharts.append(new_chart)
+        if chart in self.idealCalibrationCharts:
+            self.idealCalibrationCharts.append(new_chart)
         new_chart.popout_requested.connect(self.popoutChart)
         return new_chart
 
@@ -2371,26 +2475,38 @@ class NanoVNASaver(QWidget):
             # allow saving even if S21 is empty: fill zeros
             s21 = [Datapoint(dp.freq, 0.0, 0.0) for dp in s11]
 
-        # filename with serial number
-        fname = f"{cfg.base_name}_{idx:08d}.s2p"
-        path = os.path.join(cfg.out_dir, fname)
+        raw = Touchstone()
+        raw.s11 = s11
+        raw.s21 = s21
 
-        # Write S2P (S11 S21 S12 S22), fill S12/S22 with zeros
-        # Field order is consistent with Touchstone.FIELD_ORDER ("11","21","12","22") :contentReference[oaicite:5]{index=5}
-        with open(path, "w", encoding="utf-8") as f:
-            f.write("# HZ S RI R 50\n")
-            previous_freq = None
-            for i, dp11 in enumerate(s11):
-                if dp11.freq == previous_freq:
-                    continue
-                previous_freq = dp11.freq
-                dp21 = s21[i] if i < len(s21) else Datapoint(dp11.freq, 0.0, 0.0)
-                # S12, S22 = 0
-                f.write(
-                    f"{dp11.freq} {dp11.re} {dp11.im} "
-                    f"{dp21.re} {dp21.im} "
-                    f"0 0 0 0\n"
-                )
+        # Calibrate this sweep's snapshot so all files contain the same sweep.
+        network = average_duplicate_freq(make_full_thru_network(raw.to_skrf_network()))
+        calibrated = Touchstone()
+        calibrated.from_skrf_network(apply_external_calibration(network))
+        if not calibrated.s11 or not calibrated.s21:
+            raise ValueError("No calibrated S-parameter data to save.")
+        ideal_calibrated = Touchstone()
+        ideal_calibrated.from_skrf_network(
+            apply_external_calibration(network, ideal=True)
+        )
+        if not ideal_calibrated.s11 or not ideal_calibrated.s21:
+            raise ValueError("No ideal-calibrated S-parameter data to save.")
+
+        stem = f"{cfg.base_name}_{idx:08d}"
+        path = os.path.join(cfg.out_dir, f"{stem}.s2p")
+        for data, filename in (
+            (raw, path),
+            (calibrated, os.path.join(cfg.out_dir, f"{stem}_cal.s2p")),
+            (ideal_calibrated, os.path.join(cfg.out_dir, f"{stem}_ical.s2p")),
+        ):
+            data.filename = filename
+            data.s12 = data.s21[:]
+            data.s22 = data.s11[:]
+            data.save(4)
+            if data is calibrated:
+                save_calibration_note(filename, calpath, kVNApath)
+            elif data is ideal_calibrated:
+                save_calibration_note(filename, calpath, "", ideal=True)
         # Temperature logging for batch sweep only
         # if cfg.save_temperature:
         #     self.temperature_logger.csv_path = os.path.join(

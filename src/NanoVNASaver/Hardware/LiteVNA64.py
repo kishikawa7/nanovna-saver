@@ -88,7 +88,7 @@ class ScreenshotData:
 
 class LiteVNA64(NanoVNA_V2):
     name = "LiteVNA-64"
-    prime_first_logarithmic_point = True
+    prime_each_logarithmic_point = True
     valid_datapoints: tuple[int, ...] = (
         51,
         101,
@@ -112,6 +112,12 @@ class LiteVNA64(NanoVNA_V2):
         super().__init__(iface)
 
         self.datapoints = 201
+
+    def _readfifo_timeout(self, pointstodo: int) -> float:
+        base_timeout = super()._readfifo_timeout(pointstodo)
+        # Leave time for the device to retune and fill the FIFO without
+        # querying its IF setting.
+        return max(4.0, base_timeout + 0.5)
 
     def read_fw_version(self) -> Version:
         with self.serial.lock:

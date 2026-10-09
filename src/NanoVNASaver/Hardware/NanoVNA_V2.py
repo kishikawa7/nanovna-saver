@@ -173,7 +173,7 @@ class NanoVNA_V2(VNA):
                 rev1_real,
                 rev1_imag,
                 freq_index,
-            ) = unpack_from("<iiiiiihxxxxxx", arr, i * 32)
+            ) = unpack_from("<iiiiiiHxxxxxx", arr, i * 32)
             fwd = complex(fwd_real, fwd_imag)
             refl = complex(rev0_real, rev0_imag)
             thru = complex(rev1_real, rev1_imag)
@@ -183,9 +183,7 @@ class NanoVNA_V2(VNA):
                     f"for {len(self._sweepdata)} points"
                 )
             if freq_index in seen:
-                raise ValueError(
-                    f"Duplicate FIFO frequency index {freq_index}"
-                )
+                raise ValueError(f"Duplicate FIFO frequency index {freq_index}")
             if fwd == 0:
                 raise ValueError(
                     f"Zero forward sample at frequency index {freq_index}"
@@ -204,9 +202,7 @@ class NanoVNA_V2(VNA):
         self.serial.write(pack("<BBB", _CMD_WRITE, _ADDR_VALUES_FIFO, 0))
         sleep(WRITE_SLEEP)
         # clear sweepdata
-        self._sweepdata = [(complex(), complex())] * (
-            self.datapoints + s21hack
-        )
+        self._sweepdata = [(complex(), complex())] * (self.datapoints + s21hack)
         pointstodo = self.datapoints + s21hack
         seen_indexes: set[int] = set()
         # we read at most 255 values at a time and the time required
@@ -232,13 +228,29 @@ class NanoVNA_V2(VNA):
             # serial .read() will try to read nBytes bytes in timeout secs
             arr = self.serial.read(nBytes)
             if nBytes != len(arr):
-                logger.warning("expected %d bytes, got %d", nBytes, len(arr))
+                logger.debug(
+                    "FIFO first read: expected %d bytes, got %d; "
+                    "retrying with %.2fs timeout",
+                    nBytes,
+                    len(arr),
+                    self.serial.timeout,
+                )
                 # the way to retry on timeout is keep the data already read
                 # then try to read the rest of the data into the array
                 if nBytes > len(arr):
                     arr = arr + self.serial.read(nBytes - len(arr))
             if nBytes != len(arr):
-                return False
+                logger.warning(
+                    "FIFO response incomplete: expected %d bytes, got %d "
+                    "after retry (timeout %.2fs)",
+                    nBytes,
+                    len(arr),
+                    self.serial.timeout,
+                )
+                raise ValueError(
+                    f"Incomplete FIFO response: expected {nBytes} bytes, "
+                    f"got {len(arr)}"
+                )
 
             self._read_pointstoread(pointstoread, arr, seen_indexes)
 
@@ -247,10 +259,8 @@ class NanoVNA_V2(VNA):
         missing_indexes = expected_indexes - seen_indexes
         if missing_indexes:
             missing_preview = sorted(missing_indexes)[:10]
-            raise ValueError(
-                "Missing FIFO frequency indexes "
-                f"{missing_preview}"
-            )
+            message = f"Missing FIFO frequency indexes {missing_preview}"
+            raise ValueError(message)
         return True
 
     def readValues(self, value) -> list[complex]:

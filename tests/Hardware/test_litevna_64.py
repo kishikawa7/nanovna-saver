@@ -32,6 +32,30 @@ def test_scheduled_refresh_exits_usb_mode() -> None:
     serial.write.assert_called_once_with(b"\x20\x26\x02")
 
 
+def test_if_average_is_not_read_on_connect() -> None:
+    serial = Mock(is_open=True)
+    serial.lock = RLock()
+
+    def initialize_base(device, iface):
+        device.serial = iface
+
+    with (
+        patch.object(NanoVNA_V2, "__init__", initialize_base),
+        patch("NanoVNASaver.Hardware.LiteVNA64.sleep"),
+    ):
+        device = LiteVNA64(serial)
+
+    assert device.datapoints == 201
+    serial.write.assert_not_called()
+    serial.read.assert_not_called()
+
+
+def test_litevna_fifo_timeout_does_not_depend_on_if_readback() -> None:
+    device = object.__new__(LiteVNA64)
+    assert device._readfifo_timeout(1) >= 4.0
+    assert device._readfifo_timeout(101) > device._readfifo_timeout(1)
+
+
 class TestScreenshotData:
     @staticmethod
     def test_from_header() -> None:

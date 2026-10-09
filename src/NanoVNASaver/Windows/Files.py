@@ -17,12 +17,13 @@
 #  You should have received a copy of the GNU General Public License
 #  along with this program.  If not, see <https://www.gnu.org/licenses/>.
 import logging
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
+from ..CalibrationNote import save_calibration_note
 from ..FileDialogs import get_open_file_name, safe_file_dialog
-from ..RFTools import Datapoint
 from ..Touchstone import Touchstone
 from .Defaults import make_scrollable
 from .ui import get_window_icon
@@ -62,6 +63,14 @@ class FilesWindow(QtWidgets.QWidget):
         save_file_control_box.setMaximumWidth(300)
         save_file_control_layout = QtWidgets.QFormLayout(save_file_control_box)
 
+        self.export_calibration = QtWidgets.QComboBox()
+        self.export_calibration.addItems(
+            ["Uncalibrated", "Calibrated", "Ideal calibration (iCal)"]
+        )
+        save_file_control_layout.addRow(
+            "S-parameters:", self.export_calibration
+        )
+
         btn_export_file = QtWidgets.QPushButton("Save 1-Port file (S1P)")
         btn_export_file.clicked.connect(lambda: self.exportFile(1))
         save_file_control_layout.addRow(btn_export_file)
@@ -78,12 +87,35 @@ class FilesWindow(QtWidgets.QWidget):
         )
 
     def exportFile(self, nr_params: int = 1):
-        if len(self.app.data.s11) == 0:
+        calibration_mode = self.export_calibration.currentIndex()
+        calibrated = calibration_mode != 0
+        with self.app.dataLock:
+            if calibration_mode == 2:
+                s11 = self.app.ideal_calibrated_s11[:]
+                s21 = self.app.ideal_calibrated_s21[:]
+                calibration_path = self.app.calibrated_calpath
+                reference_path = ""
+            elif calibrated:
+                s11 = self.app.calibrated_s11[:]
+                s21 = self.app.calibrated_s21[:]
+                calibration_path = self.app.calibrated_calpath
+                reference_path = self.app.calibrated_reference_path
+            else:
+                s11 = self.app.data.s11[:]
+                s21 = self.app.data.s21[:]
+        if calibrated and not s11:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "No calibrated data",
+                "Calibration is unavailable for this sweep.",
+            )
+            return
+        if not s11:
             QtWidgets.QMessageBox.warning(
                 self, "No data to save", "There is no data to save."
             )
             return
-        if nr_params > 2 and len(self.app.data.s21) == 0:
+        if nr_params > 2 and not s21:
             QtWidgets.QMessageBox.warning(
                 self, "No S21 data to save", "There is no S21 data to save."
             )
@@ -109,15 +141,37 @@ class FilesWindow(QtWidgets.QWidget):
             logger.debug("No file name selected.")
             return
 
+        if calibrated:
+            path = Path(filename)
+            suffix = "_ical" if calibration_mode == 2 else "_cal"
+            if not path.stem.endswith(suffix):
+                cal_path = path.with_name(f"{path.stem}{suffix}{path.suffix}")
+                if cal_path.exists():
+                    answer = QtWidgets.QMessageBox.question(
+                        self,
+                        "Overwrite calibrated file?",
+                        f"{cal_path.name} already exists. Replace it?",
+                        QtWidgets.QMessageBox.StandardButton.Yes
+                        | QtWidgets.QMessageBox.StandardButton.No,
+                        QtWidgets.QMessageBox.StandardButton.No,
+                    )
+                    if answer != QtWidgets.QMessageBox.StandardButton.Yes:
+                        return
+                filename = str(cal_path)
+
         ts = Touchstone(filename)
-        ts.sdata[0] = self.app.data.s11
+        ts.sdata[0] = s11
         if nr_params > 1:
-            ts.sdata[1] = self.app.data.s21
-            for dp in self.app.data.s11:
-                ts.sdata[2].append(Datapoint(dp.freq, 0, 0))
-                ts.sdata[3].append(Datapoint(dp.freq, 0, 0))
+            ts.sdata[1] = s21
+            ts.s12 = s21[:]
+            ts.s22 = s11[:]
         try:
             ts.save(nr_params)
+            if calibrated:
+                save_calibration_note(
+                    filename, calibration_path, reference_path,
+                    ideal=calibration_mode == 2,
+                )
         except IOError as e:
             logger.exception("Error during file export: %s", e)
             return

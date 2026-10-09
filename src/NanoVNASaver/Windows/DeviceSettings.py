@@ -162,9 +162,7 @@ class DeviceSettingsWindow(QtWidgets.QWidget):
         return f"ON ({source})" if source else "ON"
 
     def updateFields(self):
-        self.label["app_calibration"].setText(
-            self._app_calibration_status()
-        )
+        self.label["app_calibration"].setText(self._app_calibration_status())
         if not self.app.vna.connected():
             self.label["status"].setText("Not connected.")
             self.label["firmware"].setText("Not connected.")
