@@ -97,6 +97,7 @@ from dataclasses import dataclass
 ####
 
 from pathlib import Path
+from serial.tools import list_ports
 from .temperature_logging import TemperatureLoggingManager
 
 logger = logging.getLogger(__name__)
@@ -162,25 +163,25 @@ def make_full_thru_network(ntwk):
     return nt
 
 
-DEFAULT_EXTERNAL_CALPATH = (
-    "/home/keisuke/Documents/Spara/caldata/nanoVNAH4/"
-    "20260710_nanoVNAH4_woDCcut_logarithmic_whitecable_10k1G/"
+CALDATA_ROOT = Path.home() / "Documents" / "Spara" / "caldata"
+DEFAULT_EXTERNAL_CALPATH = str(
+    CALDATA_ROOT / "nanoVNAH4"
+    / "20260710_nanoVNAH4_woDCcut_logarithmic_whitecable_10k1G"
 )
-VNA6000_EXTERNAL_CALPATH = (
-    "/home/keisuke/Documents/Spara/caldata/VNA6000/"
-    "20260709_VNA6000_100k_6G_woDCcut/"
+VNA6000_EXTERNAL_CALPATH = str(
+    CALDATA_ROOT / "VNA6000" / "20260709_VNA6000_100k_6G_woDCcut"
 )
 datalist = ['short','open','load','thru']
 SOCKET_SHORT_NAME = "socket_short"
 SOCKET_OPEN_NAME = "socket_open"
-kVNApath = '/home/keisuke/Documents/Spara/caldata/20260407_30k-9G_IF100Hz_-10dBm_801pt_ave10_150mm/'
+kVNApath = str(
+    CALDATA_ROOT / "20260407_30k-9G_IF100Hz_-10dBm_801pt_ave10_150mm"
+)
 ansdata = {}
 for i in ['short_P1', 'open_P1', 'load_P1', 'short_P2', 'open_P2', 'load_P2', 'thru']:
     answer_path = Path(kVNApath) / f"S_{i}.s2p"
     if answer_path.exists():
         ansdata[i] = rf.Network(str(answer_path))
-    else:
-        logger.warning("Calibration answer file not found: %s", answer_path)
 
 calpath = ""
 caldata = {}
@@ -197,14 +198,16 @@ _ideal_cal_cache = None
 
 
 def _ensure_calpath(path: str) -> str:
-    return path if path.endswith("/") else f"{path}/"
+    return str(Path(path).expanduser()) + os.sep
 
 
-def _load_external_calibration(path: str):
+def _load_external_calibration(path: str, reference_data=None):
+    if reference_data is None:
+        reference_data = ansdata
     loaded_caldata = {}
     for name in datalist:
         loaded_caldata[name] = {
-            'ntwk': get_S2P_nVNA(f'{path}S_{name}.s2p')
+            'ntwk': get_S2P_nVNA(str(Path(path) / f'S_{name}.s2p'))
         }
     socket_short_path = Path(path) / "S_socket_short.s2p"
     if socket_short_path.exists():
@@ -232,12 +235,12 @@ def _load_external_calibration(path: str):
     ]
 
     loaded_ans_ideals = []
-    if all(name in ansdata for name in (
+    if all(name in reference_data for name in (
         'short_P1', 'open_P1', 'load_P1',
         'short_P2', 'open_P2', 'load_P2', 'thru',
     )):
         fixed_ans = {
-            name: ansdata[name].interpolate(
+            name: reference_data[name].interpolate(
                 loaded_freq, kind='linear', fill_value='extrapolate'
             )
             for name in (
@@ -288,46 +291,77 @@ def _load_external_calibration(path: str):
 
 
 def set_external_calibration_path(path: str) -> bool:
-    global calpath, caldata, freq, media, ideals, ans_ideals, measured, cal
-    global _cal_cache_key, _cal_cache, _ideal_cal_cache_key, _ideal_cal_cache
-
+    if not path:
+        return False
     path = _ensure_calpath(path)
     if path == calpath and caldata:
         return True
-
     try:
-        (
-            new_caldata,
-            new_freq,
-            new_media,
-            new_ideals,
-            new_ans_ideals,
-            new_measured,
-            new_cal,
-        ) = _load_external_calibration(path)
+        loaded = _load_external_calibration(path)
     except Exception as exc:
         logger.warning(
             "Failed loading external calibration from %s: %s", path, exc
         )
         return False
-
-    calpath = path
-    caldata = new_caldata
-    freq = new_freq
-    media = new_media
-    ideals = new_ideals
-    ans_ideals = new_ans_ideals
-    measured = new_measured
-    cal = new_cal
-    _cal_cache_key = ()
-    _cal_cache = new_cal
-    _ideal_cal_cache_key = ()
-    _ideal_cal_cache = None
-    logger.info("External calibration path: %s", calpath)
+    _store_external_calibration(path, loaded)
     return True
 
 
-set_external_calibration_path(DEFAULT_EXTERNAL_CALPATH)
+def _store_external_calibration(path: str, loaded) -> None:
+    global calpath, caldata, freq, media, ideals, ans_ideals, measured, cal
+    global _cal_cache_key, _cal_cache, _ideal_cal_cache_key, _ideal_cal_cache
+
+    calpath = path
+    caldata, freq, media, ideals, ans_ideals, measured, cal = loaded
+    _cal_cache_key = ()
+    _cal_cache = cal
+    _ideal_cal_cache_key = ()
+    _ideal_cal_cache = None
+    logger.info("External calibration path: %s", calpath)
+
+
+def set_external_reference_path(path: str) -> bool:
+    """Load all reference standards before replacing calibration state."""
+    global kVNApath, ansdata, _cal_cache_key, _cal_cache
+    if not path:
+        return False
+    try:
+        new_data = {
+            name: rf.Network(str(Path(path) / f"S_{name}.s2p"))
+            for name in (
+                "short_P1", "open_P1", "load_P1",
+                "short_P2", "open_P2", "load_P2", "thru",
+            )
+        }
+        loaded = (
+            _load_external_calibration(calpath, new_data) if caldata else None
+        )
+    except Exception as exc:
+        logger.warning(
+            "Failed loading reference standards from %s: %s", path, exc
+        )
+        return False
+    kVNApath = _ensure_calpath(path)
+    ansdata = new_data
+    if loaded is not None:
+        _store_external_calibration(calpath, loaded)
+    else:
+        _cal_cache_key = ()
+        _cal_cache = None
+    return True
+
+
+if Path(DEFAULT_EXTERNAL_CALPATH).is_dir():
+    set_external_calibration_path(DEFAULT_EXTERNAL_CALPATH)
+
+
+def default_pico_port() -> str:
+    """Keep a stable Linux Pico path; otherwise let the user select a port."""
+    stable_port = Path(
+        "/dev/serial/by-id/"
+        "usb-MicroPython_Board_in_FS_mode_e664a836a33ba327-if00"
+    )
+    return str(stable_port) if stable_port.exists() else ""
 
 
 def _frequency_key(frequency) -> tuple[int, ...]:
@@ -532,6 +566,7 @@ class BatchSweepConfig:
     count: int
     reboot_every: int
     save_temperature: bool = True
+    pico_port: str = ""
 
 class BatchSweepDialog(QtWidgets.QDialog):
     def __init__(self, parent=None, default_dir: str = "", default_base: str = "sweep"):
@@ -575,8 +610,23 @@ class BatchSweepDialog(QtWidgets.QDialog):
 
         # Temperature logging
         self.temp_checkbox = QtWidgets.QCheckBox("Save temperature log")
-        self.temp_checkbox.setChecked(True)
+        saved_port = parent.temperature_logger.pico_port if parent else ""
+        self.temp_checkbox.setChecked(bool(saved_port))
         layout.addRow("Temperature:", self.temp_checkbox)
+        self.pico_port_combo = QtWidgets.QComboBox()
+        self.pico_port_combo.setEditable(True)
+        self.pico_port_combo.addItem("")
+        self.pico_port_combo.addItems(
+            sorted(port.device for port in list_ports.comports())
+        )
+        self.pico_port_combo.setCurrentText(saved_port)
+        self.pico_port_combo.setToolTip(
+            "Pico temperature sensor port, e.g. COM4. "
+            "Use a different port from the VNA."
+        )
+        self.pico_port_combo.setEnabled(self.temp_checkbox.isChecked())
+        self.temp_checkbox.toggled.connect(self.pico_port_combo.setEnabled)
+        layout.addRow("Pico port:", self.pico_port_combo)
 
         # Buttons
         buttons = QtWidgets.QDialogButtonBox(
@@ -618,13 +668,14 @@ class BatchSweepDialog(QtWidgets.QDialog):
                 count=count,
                 reboot_every=reboot_every,
                 save_temperature=save_temperature,
+                pico_port=self.pico_port_combo.currentText().strip(),
         )
 
 class NanoVNASaver(QWidget):
     version = VERSION
     scale_factor = 1.0
 
-    def __init__(self) -> None:
+    def __init__(self, *, scan_serial_ports: bool = True) -> None:
         super().__init__()
         self.communicate = Communicate()
         self.s21att = 0.0
@@ -635,6 +686,11 @@ class NanoVNASaver(QWidget):
         self.external_calibration_user_path = self.settings.value(
             "ExternalSOLTPath", "", str
         )
+        reference_path = self.settings.value(
+            "ExternalSOLTReferencePath", "", str
+        )
+        if reference_path:
+            set_external_reference_path(reference_path)
         self.threadpool = QtCore.QThreadPool()
         self.sweep = Sweep()
         self.worker = SweepWorker(self)
@@ -654,7 +710,9 @@ class NanoVNASaver(QWidget):
         self.calibration: Calibration = Calibration()
         self.sweep_control = SweepControl(self)
         self.marker_control = MarkerControl(self)
-        self.serial_control = SerialControl(self)
+        self.serial_control = SerialControl(
+            self, scan_serial_ports=scan_serial_ports
+        )
 
         # ---- Sweep snapshot 初期化 ----
         self._sweep_snapshot = self.sweep.copy()
@@ -716,7 +774,9 @@ class NanoVNASaver(QWidget):
         self._batch_watchdog.timeout.connect(self._batch_watchdog_tick)
 
         self.temperature_logger = TemperatureLoggingManager(
-            pico_port="/dev/serial/by-id/usb-MicroPython_Board_in_FS_mode_e664a836a33ba327-if00",
+            pico_port=self.settings.value(
+                "PicoTemperaturePort", default_pico_port(), str
+            ),
             csv_path=""
         )
 
@@ -1097,6 +1157,15 @@ class NanoVNASaver(QWidget):
 
         external_solt_layout.addRow("Folder:", self.external_calibration_path_edit)
         external_solt_layout.addRow(external_solt_buttons)
+        self.external_reference_path_edit = QtWidgets.QLineEdit(kVNApath)
+        self.external_reference_path_edit.setReadOnly(True)
+        self.external_reference_path_edit.setToolTip(kVNApath)
+        btn_reference_select = QtWidgets.QPushButton("Select reference ...")
+        btn_reference_select.clicked.connect(self.select_external_reference_path)
+        external_solt_layout.addRow(
+            "Standards:", self.external_reference_path_edit
+        )
+        external_solt_layout.addRow(btn_reference_select)
         left_column.addWidget(external_solt_box)
         if self.external_calibration_user_path:
             self._set_external_calibration_path(
@@ -1299,6 +1368,26 @@ class NanoVNASaver(QWidget):
         if not path:
             return
         self._set_external_calibration_path(path, save_user_path=True)
+
+    def select_external_reference_path(self) -> None:
+        path = get_existing_directory(
+            self, "Select reference standards folder", kVNApath
+        )
+        if not path:
+            return
+        if not set_external_reference_path(path):
+            self.showError(
+                "Failed loading reference standards. Required files:\n"
+                "S_short_P1.s2p, S_open_P1.s2p, S_load_P1.s2p,\n"
+                "S_short_P2.s2p, S_open_P2.s2p, S_load_P2.s2p, S_thru.s2p"
+            )
+            return
+        self.settings.setValue("ExternalSOLTReferencePath", kVNApath)
+        self.settings.sync()
+        self.external_reference_path_edit.setText(kVNApath)
+        self.external_reference_path_edit.setToolTip(kVNApath)
+        if self.data.s11:
+            self.dataUpdated()
 
     def reset_external_calibration_path_auto(self) -> None:
         self.external_calibration_user_path = ""
@@ -1948,7 +2037,8 @@ class NanoVNASaver(QWidget):
 
         self.settings.store_config()
 
-        # Dosconnect connected devices and release serial port
+        # Disconnect connected devices and release serial ports.
+        self.temperature_logger.disconnect()
         self.serial_control.disconnect_device()
 
         a0.accept()
@@ -1989,6 +2079,17 @@ class NanoVNASaver(QWidget):
         if not cfg.out_dir:
             self.showError("Please select a save directory.")
             return
+        if cfg.save_temperature and not cfg.pico_port:
+            self.showError("Please select the Pico temperature sensor port.")
+            return
+        if cfg.save_temperature and cfg.pico_port == getattr(
+            self.vna.serial, "port", None
+        ):
+            self.showError("Pico and VNA must use different serial ports.")
+            return
+        self.temperature_logger.set_port(cfg.pico_port)
+        self.settings.setValue("PicoTemperaturePort", cfg.pico_port)
+        self.settings.sync()
         os.makedirs(cfg.out_dir, exist_ok=True)
 
         self._batch_cfg = cfg
@@ -2479,34 +2580,37 @@ class NanoVNASaver(QWidget):
         raw.s11 = s11
         raw.s21 = s21
 
-        # Calibrate this sweep's snapshot so all files contain the same sweep.
-        network = average_duplicate_freq(make_full_thru_network(raw.to_skrf_network()))
-        calibrated = Touchstone()
-        calibrated.from_skrf_network(apply_external_calibration(network))
-        if not calibrated.s11 or not calibrated.s21:
-            raise ValueError("No calibrated S-parameter data to save.")
-        ideal_calibrated = Touchstone()
-        ideal_calibrated.from_skrf_network(
-            apply_external_calibration(network, ideal=True)
-        )
-        if not ideal_calibrated.s11 or not ideal_calibrated.s21:
-            raise ValueError("No ideal-calibrated S-parameter data to save.")
-
         stem = f"{cfg.base_name}_{idx:08d}"
         path = os.path.join(cfg.out_dir, f"{stem}.s2p")
-        for data, filename in (
-            (raw, path),
-            (calibrated, os.path.join(cfg.out_dir, f"{stem}_cal.s2p")),
-            (ideal_calibrated, os.path.join(cfg.out_dir, f"{stem}_ical.s2p")),
-        ):
+        raw.filename = path
+        raw.s12 = raw.s21[:]
+        raw.s22 = raw.s11[:]
+        raw.save(4)
+
+        # A new PC may not have calibration files yet. Preserve every raw sweep
+        # and export whichever calibrations are available for this snapshot.
+        network = average_duplicate_freq(
+            make_full_thru_network(raw.to_skrf_network())
+        )
+        for ideal, suffix in ((False, "cal"), (True, "ical")):
+            data = Touchstone()
+            try:
+                data.from_skrf_network(
+                    apply_external_calibration(network, ideal=ideal)
+                )
+                if not data.s11 or not data.s21:
+                    raise ValueError("No calibrated S-parameter data to save.")
+            except Exception as exc:
+                logger.warning("Batch %s export skipped: %s", suffix, exc)
+                continue
+            filename = os.path.join(cfg.out_dir, f"{stem}_{suffix}.s2p")
             data.filename = filename
             data.s12 = data.s21[:]
             data.s22 = data.s11[:]
             data.save(4)
-            if data is calibrated:
-                save_calibration_note(filename, calpath, kVNApath)
-            elif data is ideal_calibrated:
-                save_calibration_note(filename, calpath, "", ideal=True)
+            save_calibration_note(
+                filename, calpath, "" if ideal else kVNApath, ideal=ideal
+            )
         # Temperature logging for batch sweep only
         # if cfg.save_temperature:
         #     self.temperature_logger.csv_path = os.path.join(

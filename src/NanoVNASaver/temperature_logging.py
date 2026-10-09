@@ -1,6 +1,7 @@
 import csv
 import os
 import re
+from contextlib import suppress
 from datetime import datetime
 
 from .pico_temp_client import PicoTempClient
@@ -22,8 +23,19 @@ class TemperatureLoggingManager:
             self.client.open()
             return True
         except Exception:
-            self.client = None
+            self.disconnect()
             return False
+
+    def disconnect(self) -> None:
+        if self.client is not None:
+            with suppress(Exception):
+                self.client.close()
+        self.client = None
+
+    def set_port(self, port: str) -> None:
+        if port != self.pico_port:
+            self.disconnect()
+            self.pico_port = port
 
     def set_enabled(self, enabled: bool) -> None:
         self.enabled = enabled

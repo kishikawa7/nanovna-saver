@@ -87,6 +87,17 @@ Main development is currently done on Linux (Debian 11)
 Installation
 ------------
 
+Windows (this customized fork)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Use the ``raspi-setup-20260825`` branch of this fork. Download the
+``NanoVNASaver.windows.x64`` artifact from its Windows Release workflow,
+or install Python 3.12 (64-bit), run ``setup-windows.bat``, then start
+``run-windows.bat``. Calibration folders and the Pico serial port can be
+selected in the application.
+
+`Windows setup guide (Japanese) <docs/WINDOWS_SETUP_JA.md>`_
+
 Raspberry Pi OS migration
 ^^^^^^^^^^^^^^^^^^^^^^^^^
 

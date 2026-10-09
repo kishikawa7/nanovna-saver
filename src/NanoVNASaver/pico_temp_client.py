@@ -1,10 +1,12 @@
 import time
+
 import serial
 
 
 class PicoTempClient:
-    def __init__(self, port: str="/dev/serial/by-id/usb-MicroPython_Board_in_FS_mode_e664a836a33ba327-if00"
-, baudrate: int = 115200, timeout: float = 2.0):
+    def __init__(
+        self, port: str, baudrate: int = 115200, timeout: float = 2.0
+    ):
         self.port = port
         self.baudrate = baudrate
         self.timeout = timeout
@@ -23,8 +25,12 @@ class PicoTempClient:
             if not line:
                 break
 
-        if self.ping() != "PONG":
-            raise RuntimeError("Pico did not respond to PING")
+        try:
+            if self.ping() != "PONG":
+                raise RuntimeError("Pico did not respond to PING")
+        except Exception:
+            self.close()
+            raise
 
     def close(self) -> None:
         if self.ser is not None:

@@ -1,5 +1,11 @@
 # Installation Instructions
 
+## Windows: customized fork
+
+For this fork's logarithmic/batch sweeps, external SOLT and temperature logging,
+follow [Windows setup (Japanese)](WINDOWS_SETUP_JA.md). Use this fork's Windows
+Actions artifact or its `setup-windows.bat` and `run-windows.bat` scripts.
+
 ## Installation and Use with pipx
 For installation it is recommended to use pipx instead of pip.  Most installations nowadays require the usage of a virtual environment when using pip, pipx automatically arranges this for you.
 

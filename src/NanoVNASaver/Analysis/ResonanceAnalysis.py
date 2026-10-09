@@ -19,6 +19,7 @@
 import csv
 import logging
 import os
+import tempfile
 from typing import TYPE_CHECKING
 
 from PySide6 import QtWidgets
@@ -82,7 +83,9 @@ class ResonanceAnalysis(Analysis):
     def runAnalysis(self):
         self.reset()
         self.filename = (
-            os.path.join("/tmp/", f"{self.input_description.text()}.csv")
+            os.path.join(
+                tempfile.gettempdir(), f"{self.input_description.text()}.csv"
+            )
             if self.input_description.text()
             else ""
         )

@@ -2,16 +2,21 @@ name: Windows Release
 
 on:
   push:
+    branches:
+      - raspi-setup-20260825
     tags:
       - v*
+  pull_request:
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   release:
     runs-on: windows-latest
-    strategy:
-      matrix:
-        arch: [x64, ]
+    env:
+      QT_QPA_PLATFORM: offscreen
 
     steps:
     - uses: actions/checkout@v4
@@ -20,21 +25,43 @@ jobs:
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
-        python-version: 3.13
-        architecture: ${{ matrix.arch }}
-    - name: Install dependencies and pyinstall
+        python-version: '3.12'
+        architecture: x64
+    - name: Install locked dependencies
       run: |
-        python3 -m venv venv
-        .\venv\Scripts\activate
-        python3 -m pip install uv
-        uv sync
+        python -m pip install uv==0.5.29
+        uv sync --locked --python 3.12
+    - name: Run tests
+      run: uv run --locked pytest tests -q
+    - name: Check GUI startup
+      run: uv run --locked NanoVNASaver --smoke-test
     - name: Build binary
+      run: uv run --locked task build-pkg-win
+    - name: Check packaged GUI startup
       run: |
-        .\venv\Scripts\activate
-        uv run task ui-compile
-        uv run task build-pkg-win
+        Remove-Item Env:QT_QPA_PLATFORM
+        $app = Start-Process -FilePath .\dist\nanovna-saver.exe -ArgumentList '--smoke-test', '--debug-file', 'windows-smoke.log' -PassThru
+        if (-not $app.WaitForExit(90000)) {
+          $app.Kill()
+          throw 'Packaged GUI startup timed out'
+        }
+        if ($app.ExitCode -ne 0) {
+          throw "Packaged GUI exited with code $($app.ExitCode)"
+        }
+    - name: Include Windows instructions
+      run: Copy-Item docs\WINDOWS_SETUP_JA.md dist\WINDOWS_SETUP_JA.md
     - name: Archive production artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: NanoVNASaver.${{ matrix.arch }}
-        path: dist/nanovna-saver.exe
+        name: NanoVNASaver.windows.x64
+        path: |
+          dist/nanovna-saver.exe
+          dist/WINDOWS_SETUP_JA.md
+        if-no-files-found: error
+    - name: Upload startup log
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: windows-startup-log
+        path: windows-smoke.log
+        if-no-files-found: ignore

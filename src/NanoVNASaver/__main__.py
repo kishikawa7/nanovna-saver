@@ -25,10 +25,19 @@ data points, and generally display and analyze the
 resulting data.
 """
 
+# Environment and console handling must precede Qt and dependency imports.
+# ruff: noqa: E402
+
 import argparse
 import logging
 import os
 import sys
+
+# Windows GUI executables have no console. Dependencies may still write to it.
+if sys.stdout is None:
+    sys.stdout = open(os.devnull, "w", encoding="utf-8")
+if sys.stderr is None:
+    sys.stderr = open(os.devnull, "w", encoding="utf-8")
 
 _qt_logging_rules = os.environ.get("QT_LOGGING_RULES", "")
 _svg_draw_rule = "qt.svg.draw=false"
@@ -39,7 +48,7 @@ if _svg_draw_rule not in _qt_logging_rules.split(";"):
         else _svg_draw_rule
     )
 
-from PySide6 import QtGui, QtWidgets
+from PySide6 import QtCore, QtGui, QtWidgets
 
 from NanoVNASaver import NanoVNASaver
 from NanoVNASaver.About import INFO, VERSION
@@ -76,6 +85,10 @@ def main():
     )
     parser.add_argument(
         "--version", action="version", version=f"NanoVNASaver {VERSION}"
+    )
+    parser.add_argument(
+        "--smoke-test", action="store_true",
+        help="Open the GUI briefly and exit without scanning serial ports",
     )
     args = parser.parse_args()
 
@@ -116,7 +129,7 @@ def main():
     if "Fusion" in QtWidgets.QStyleFactory.keys():
         app.setStyle("Fusion")
 
-    window = NanoVNASaver()
+    window = NanoVNASaver(scan_serial_ports=not args.smoke_test)
     window.show()
 
     if args.auto_connect:
@@ -131,12 +144,14 @@ def main():
         t.load()
         window.setReference(t.s11, t.s21, args.ref_file)
         window.dataUpdated()
+    if args.smoke_test:
+        QtCore.QTimer.singleShot(1000, app.quit)
     try:
-        app.exec()
+        return app.exec()
     except BaseException as exc:
         logger.exception("%s", exc)
         raise exc
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

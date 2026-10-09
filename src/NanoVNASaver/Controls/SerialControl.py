@@ -38,13 +38,14 @@ class SerialControl(Control):
     # true when serial port was connected and false when it was disconnected
     connected = Signal(bool)
 
-    def __init__(self, app: "vna_app"):
+    def __init__(self, app: "vna_app", *, scan_serial_ports: bool = True):
         super().__init__(app, "Serial port control")
 
         self.interface = Interface("serial", "none")
         self.inp_port = QtWidgets.QComboBox()
         self.inp_port.setMinimumHeight(20)
-        self.rescanSerialPort()
+        if scan_serial_ports:
+            self.rescanSerialPort()
         self.inp_port.setEditable(True)
         self.inp_port.currentIndexChanged.connect(self.update_connect_btn_state)
         self.btn_rescan = QtWidgets.QPushButton("Rescan")

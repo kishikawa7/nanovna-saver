@@ -18,6 +18,7 @@
 #  along with this program.  If not, see <https://www.gnu.org/licenses/>.
 import logging
 import os
+import sys
 from contextlib import suppress
 from pathlib import Path
 from time import monotonic, sleep
@@ -75,6 +76,9 @@ def _usb_device_node_for_serial(port: str | None) -> Path | None:
 
 def _reset_usb_device_for_serial(port: str | None) -> bool:
     """Best-effort Linux USB-level reset for a serial device."""
+    if not sys.platform.startswith("linux"):
+        logger.info("USB-level reset is unavailable on %s", sys.platform)
+        return False
     usb_device = _usb_device_node_for_serial(port)
     if usb_device is None:
         logger.warning("Could not resolve USB device for serial port %s", port)
